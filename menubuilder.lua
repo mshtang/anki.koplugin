@@ -158,7 +158,7 @@ local function build_single_dialog(title, input, hint, description, callback)
     local input_dialog -- saved first so we can reference it in the callbacks
     input_dialog = InputDialog:new {
         title = title,
-        input = input,
+        input = tostring(input),
         input_hint = hint,
         description = description,
         buttons = {{
