@@ -262,6 +262,8 @@ function AnkiWidget:handle_events()
     end
 
     self.onBookMetadataChanged = function(obj, updated_props)
+        -- no need to try doing this when a doc was modified from the file browser, we'll redo this on doc load
+        if not self.ui.document then return end
         local filepath = updated_props.filepath
         self:extend_doc_settings(filepath, self.ui.bookinfo:getDocProps(filepath, updated_props.doc_props))
     end
