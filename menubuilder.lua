@@ -174,7 +174,7 @@ function MenuConfigOpt:build_single_dialog()
         self:update_value(dialog:getInputText())
         UIManager:close(dialog)
     end
-    local input_dialog = build_single_dialog(self.name, self:get_value_nodefault(), self.name, self.description, callback)
+    local input_dialog = build_single_dialog(self.name, self:get_value_nodefault() or '', self.name, self.description, callback)
     UIManager:show(input_dialog)
     input_dialog:onShowKeyboard()
 end
@@ -316,15 +316,16 @@ function MenuBuilder:build()
     for name, p in pairs(config.profiles) do
         local menu_options = {}
         for _, setting in ipairs(config) do
-                local user_conf = setting:copy {
-                    profile = p,
-                    value = p.data[setting.id]
-                }
-                local idx = menu_entries[setting.id]
-                local entry = menu_entries[idx]
-                if entry then
-                    table.insert(menu_options, MenuConfigOpt:new{ user_conf = user_conf, menu_entry = entry, idx = idx, enabled = p.data[setting.id] ~= nil })
-                end
+            local user_conf = setting:copy {
+                -- when setting is accessed through the menu setting.default_profile will never be set
+                active_profile = p,
+                used_profile = p
+            }
+            local idx = menu_entries[setting.id]
+            local entry = menu_entries[idx]
+            if entry then
+                table.insert(menu_options, MenuConfigOpt:new{ user_conf = user_conf, menu_entry = entry, idx = idx, enabled = p.data[setting.id] ~= nil })
+            end
         end
         table.sort(menu_options, function(a,b) return a.idx < b.idx end)
 
@@ -351,8 +352,6 @@ function MenuBuilder:convert_opt(opt)
         keep_menu_open = true,
         --enabled_func = function() return opt.enabled end,
         hold_callback = function()
-            -- no point in allowing deleting of stuff in the default profile
-            if opt.profile.name == "default" then return end
             UIManager:show(ConfirmBox:new{
                 text = "Do you want to delete this setting from the current profile?",
                 ok_callback = function()

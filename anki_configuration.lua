@@ -7,14 +7,22 @@ local lfs = require("libs/libkoreader-lfs")
 -- This represents a Setting defined by the user
 -- e.g. Deck name, note type, etc.
 --]]
-local Setting = {}
+local Setting = {
+    active_profile = nil,  -- currently loaded profile
+    default_profile = nil, -- default profile (if existing)
+    used_profile = nil     -- used to refer to either active or default profile, or nil when setting was not filled in
+}
 local Setting_mt = {
     __index = function(t, key) return rawget(t, key) or Setting[key] end
 }
 
--- TODO when you update a setting on the fly it doesn't immediately propagate
 function Setting:get_value_nodefault()
-    return self.profile and self.profile.data[self.id]
+    for _, profile in ipairs({self.active_profile, self.default_profile}) do
+        if profile and profile.data[self.id] then
+            self.used_profile = profile
+            return profile.data[self.id]
+        end
+    end
 end
 
 function Setting:get_value()
@@ -22,11 +30,18 @@ function Setting:get_value()
 end
 
 function Setting:update_value(new)
-    self.profile:update(self.id, new)
+    if type(new) == "string" and #new == 0 then
+        self.used_profile:delete(self.id)
+    else
+        self.used_profile:update(self.id, new)
+    end
 end
 
 function Setting:delete()
-    self.profile:delete(self.id)
+    -- this can be nil when deleting a setting that was never set
+    if self.used_profile then
+        self.used_profile:delete(self.id)
+    end
 end
 
 function Setting:new(opts)
@@ -115,11 +130,11 @@ function Configuration:load_profile(profile_name)
     local main_profile, default_profile = assert(self.profiles[profile_name], ("Non existing profile %s!"):format(profile_name)), self.profiles['default']
     local missing = {}
     for _, opt in ipairs(self) do
+        opt.active_profile = main_profile
+        opt.default_profile = default_profile
         if main_profile.data[opt.id] then
-            opt.profile = main_profile
             opt.value = main_profile.data[opt.id]
         elseif default_profile and default_profile.data[opt.id] then
-            opt.profile = default_profile
             opt.value = default_profile.data[opt.id]
         elseif opt.required then
             table.insert(missing, opt.id)
