@@ -28,6 +28,8 @@ KOReader plugin enabling Anki note generation for words looked up in the interna
 
 When the plugin has been installed succesfully, there will be an extra button present on the reader's dictionary popup window, allowing the user to create an Anki note.
 
+The plugin can be configured via the menu, under Search (looking glass icon) - Settings - Anki Settings
+
 
 ![image](https://user-images.githubusercontent.com/34285115/228915515-b6d3eef6-d9e3-4899-9922-db040a29f2b3.png)
 
@@ -73,7 +75,7 @@ These settings are configured via a user profile, see [Profiles](profiles/README
 ### Offline usage
 Notes are saved locally on the device when the remotely running Anki isn't available. When it becomes available again, the user will be reminded they have unsynced notes. 
 
-This can also be done manually by pressing and holding the 'Add to Anki' button, and choosing the manual sync option.
+This can also be done manually through the aforementioned settings.
 
 ### Extra options
 
@@ -81,8 +83,6 @@ As mentioned earlier, when pressing and holding the 'Add to Anki' button, a sepa
 
 ![image](https://github.com/Ajatt-Tools/anki.koplugin/assets/34285115/932df377-c9fe-4083-8964-8536780b2920)
 
-##### Sync offline notes
-This option can be used to send the locally stored notes to Anki.
 ##### Custom tags
 This allows the user to allows the user to create a card with custom tags.
 ##### Custom context
@@ -94,28 +94,7 @@ Link the currently opened document with a different user profile.
 
 ## Configuration
 
-Configuration is done by defining profiles, See [Profiles](profiles/README.md) for more info.
-
-### Edit configuration within KOreader
-There is code in place to create a menu, with which some of the fields can be edited on the reader itself. Adding an option in the KOreader's menu isn't possible from within a standalone plugin, but it can be done with a [user patch](https://github.com/koreader/koreader/wiki/User-patches).
-
-<details>
-  <summary>Show snippet</summary>
-  Save the code snippet below in a file with the name `2-anki-menu-patch.lua`. This file should be stored in `koreader/patches`.
-  
-  ```lua
-  local FileManagerMenuOrder = require("ui/elements/filemanager_menu_order")
-  local ReaderMenuOrder = require("ui/elements/reader_menu_order")
-  
-  table.insert(FileManagerMenuOrder.search, 5, "anki_settings")
-  table.insert(ReaderMenuOrder.search, 5, "anki_settings")
-  ```
-    
-</details>
-
-
-If everything goes right, this should add an extra option to the search menu:
-![2023-03-30_19-57](https://user-images.githubusercontent.com/34285115/228923486-bc6f87ec-f65a-4789-bcb5-e053ba36aa5c.png)
+Configuration is done by defining profiles, See [Profiles](profiles/README.md) for more info. This can also be done through the menu settings
 
 When editing a profile which is *not* the default one, it's possible to 'unset' a setting (meaning it falls back on whatever is present in the `default.lua` profile). This is done by pressing and holding the setting you would like to reset.
 

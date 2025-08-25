@@ -1,4 +1,5 @@
 local ButtonDialog = require("ui/widget/buttondialog")
+local ConfirmBox = require("ui/widget/confirmbox")
 local CustomContextMenu = require("customcontextmenu")
 local DataStorage = require("datastorage")
 local DictQuickLookup = require("ui/widget/dictquicklookup")
@@ -53,7 +54,6 @@ function AnkiWidget:show_profiles_widget(opts)
 end
 
 function AnkiWidget:show_config_widget()
-    local note_count = #self.anki_connect.local_notes
     local with_custom_tags_cb = function()
         self.current_note:add_tags(Configuration.custom_tags:get_value())
         self.anki_connect:add_note(self.current_note)
@@ -61,7 +61,6 @@ function AnkiWidget:show_config_widget()
     end
     self.config_widget = ButtonDialog:new {
         buttons = {
-            {{ text = ("Sync (%d) offline note(s)"):format(note_count), id = "sync", enabled = note_count > 0, callback = function() self.anki_connect:sync_offline_notes() end }},
             {{ text = "Add with custom tags", id = "custom_tags", callback = with_custom_tags_cb }},
             {{
                 text = "Add with custom context",
@@ -117,12 +116,61 @@ end
 -- items to the dictionary menu
 -- ]]
 function AnkiWidget:addToMainMenu(menu_items)
-    -- TODO an option to create a new profile (based on existing ones) would be cool
+    menu_items.anki_settings = { text = ("Anki Settings"), sorting_hint = "search_settings", sub_item_table = self:buildSettings() }
+end
+
+function AnkiWidget:buildSettings()
     local builder = MenuBuilder:new{
         extensions = self.extensions,
         ui = self.ui
     }
-    menu_items.anki_settings = { text = ("Anki Settings"), sub_item_table = builder:build() }
+    local function make_new_profile(start_data)
+        return function()
+            local input_dialog = MenuBuilder.build_single_dialog("Profile name", "", "", "Choose a name for the profile", function(obj)
+                local profile = obj:getInputText()
+                if Configuration.profiles[profile] then
+                    return UIManager:show(InfoMessage:new { text = "Profile already exists! Pick another name.", timeout = 4 })
+                end
+                Configuration.profiles[profile] = Configuration.Profile:new(profile, DataStorage:getFullDataDir() .. "/plugins/anki.koplugin/profiles/" .. profile .. ".lua", start_data)
+                Configuration.profiles[profile]:init_settings() -- make sure this is backed by a file on disk
+                self.ui.menu.menu_items.anki_settings.sub_item_table = self:buildSettings()
+                UIManager:close(obj)
+            end)
+            UIManager:show(input_dialog)
+            input_dialog:onShowKeyboard()
+        end
+    end
+
+    local profile_names = {}
+    for pname,_ in pairs(Configuration.profiles) do table.insert(profile_names, {
+        text = pname,
+        callback = make_new_profile(Configuration.profiles[pname].data)
+    })
+    end
+    local profiles = builder:build()
+    local has_profiles = #profiles > 0
+    for idx, menu_item in ipairs(profiles) do
+        menu_item.hold_callback = function()
+            UIManager:show(ConfirmBox:new{
+                text = "Do you want to delete this profile? This cannot be undone.",
+                ok_callback = function()
+                    local profile_name = menu_item.text
+                    Configuration.profiles[profile_name]:purge()
+                    Configuration.profiles[profile_name] = nil
+                    self.ui.menu.menu_items.anki_settings.sub_item_table = self:buildSettings()
+                    if self.ui.menu.onTapCloseMenu then self.ui.menu:onTapCloseMenu()
+                    elseif self.ui.menu.onCloseFileManagerMenu then self.ui.menu:onCloseFileManagerMenu() end
+                end
+            })
+        end
+    end
+    table.insert(profiles, #profiles+1, { text = "Clone profile from ...", enabled_func = function() return has_profiles end, sub_item_table = profile_names })
+    table.insert(profiles, #profiles+1, { text = "Create new profile", callback = make_new_profile({}) })
+    local note_count = #self.anki_connect.local_notes
+    return {
+        { text = ("Edit profiles"), sub_item_table = profiles },
+        { text = ("Sync (%d) offline note(s)"):format(note_count), enabled_func = function() return note_count > 0 end, callback = function() self.anki_connect:sync_offline_notes() end },
+    }
 end
 
 function AnkiWidget:load_extensions()

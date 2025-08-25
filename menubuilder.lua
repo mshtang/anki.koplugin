@@ -154,7 +154,7 @@ function MenuConfigOpt:new(o)
     return setmetatable(new_, { __index = index })
 end
 
-local function build_single_dialog(title, input, hint, description, callback)
+function MenuBuilder.build_single_dialog(title, input, hint, description, callback)
     local input_dialog -- saved first so we can reference it in the callbacks
     input_dialog = InputDialog:new {
         title = title,
@@ -174,7 +174,7 @@ function MenuConfigOpt:build_single_dialog()
         self:update_value(dialog:getInputText())
         UIManager:close(dialog)
     end
-    local input_dialog = build_single_dialog(self.name, self:get_value_nodefault() or '', self.name, self.description, callback)
+    local input_dialog = MenuBuilder.build_single_dialog(self.name, self:get_value_nodefault() or '', self.name, self.description, callback)
     UIManager:show(input_dialog)
     input_dialog:onShowKeyboard()
 end
@@ -217,7 +217,7 @@ function MenuConfigOpt:build_list_dialog()
         UIManager:close(dialog)
     end
     local description = self.description.."\nMultiple values can be listed, separated by a comma."
-    local input_dialog = build_single_dialog(self.name,table.concat(self:get_value_nodefault() or {}, ","), self.name, description, callback)
+    local input_dialog = MenuBuilder.build_single_dialog(self.name,table.concat(self:get_value_nodefault() or {}, ","), self.name, description, callback)
     UIManager:show(input_dialog)
     input_dialog:onShowKeyboard()
 end
@@ -257,7 +257,7 @@ function MenuConfigOpt:build_map_dialog()
             self:update_value(new)
             UIManager:close(dialog)
         end
-        local input_dialog = build_single_dialog(entry_key, new[entry_key] or "", nil, self.new_entry_value, cb)
+        local input_dialog = MenuBuilder.build_single_dialog(entry_key, new[entry_key] or "", nil, self.new_entry_value, cb)
         UIManager:show(input_dialog)
         input_dialog:onShowKeyboard()
     end
@@ -343,6 +343,7 @@ function MenuBuilder:build()
         table.sort(sub_item_table, function(a,b) return group_order[a.text] < group_order[b.text] end)
         table.insert(profiles, { text = name, sub_item_table = sub_item_table })
     end
+    if #profiles > 0 then profiles[#profiles].separator = true end
     return profiles
 end
 

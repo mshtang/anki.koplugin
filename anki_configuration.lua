@@ -92,6 +92,11 @@ function Profile:delete(id)
     self.settings:delSetting(id)
 end
 
+function Profile:purge()
+    -- bit odd, we have to make sure init has been called, we try to avoid this if not necessary so it doesn't overwrite comments unnecessarily
+    if not self.settings then self:init_settings() end
+    self.settings:purge()
+end
 
 
 --[[
@@ -190,4 +195,5 @@ function Configuration:save()
 end
 
 Configuration:init_profiles()
+Configuration.Profile = Profile
 return Configuration
