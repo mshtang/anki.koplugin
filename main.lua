@@ -133,7 +133,12 @@ function AnkiWidget:buildSettings()
                 end
                 Configuration.profiles[profile] = Configuration.Profile:new(profile, DataStorage:getFullDataDir() .. "/plugins/anki.koplugin/profiles/" .. profile .. ".lua", start_data)
                 Configuration.profiles[profile]:init_settings() -- make sure this is backed by a file on disk
-                self.ui.menu.menu_items.anki_settings.sub_item_table = self:buildSettings()
+                if self.ui.menu.menu_items.anki_settings then
+                    self.ui.menu.menu_items.anki_settings.sub_item_table = self:buildSettings()
+                else
+                    -- TODO this can be removed again after a while, it prevents crashes for old users that still have the patch enabled.
+                    UIManager:show(InfoMessage:new { text = "Please disable the custom userpatch. Anki Settings are now available by default under Search (looking glass icon) - Settings", timeout = 20 })
+                end
                 UIManager:close(obj)
             end)
             UIManager:show(input_dialog)
@@ -157,7 +162,12 @@ function AnkiWidget:buildSettings()
                     local profile_name = menu_item.text
                     Configuration.profiles[profile_name]:purge()
                     Configuration.profiles[profile_name] = nil
-                    self.ui.menu.menu_items.anki_settings.sub_item_table = self:buildSettings()
+                    if self.ui.menu.menu_items.anki_settings then
+                        self.ui.menu.menu_items.anki_settings.sub_item_table = self:buildSettings()
+                    else
+                        -- TODO this can be removed again after a while, it prevents crashes for old users that still have the patch enabled.
+                        UIManager:show(InfoMessage:new { text = "Please disable the custom userpatch. Anki Settings are now available by default under Search (looking glass icon) - Settings", timeout = 20 })
+                    end
                     if self.ui.menu.onTapCloseMenu then self.ui.menu:onTapCloseMenu()
                     elseif self.ui.menu.onCloseFileManagerMenu then self.ui.menu:onCloseFileManagerMenu() end
                 end
