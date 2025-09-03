@@ -416,6 +416,9 @@ function AnkiWidget:onDictButtonsReady(popup_dict, buttons)
     if self.ui and not self.ui.document then
         return
     end
+    if self.ui.vocabbuilder and UIManager:isWidgetShown(self.ui.vocabbuilder.widget) then
+        return
+    end
     self.add_to_anki_btn = {
         id = "add_to_anki",
         text = _("Add to Anki"),
