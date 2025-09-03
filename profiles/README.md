@@ -14,10 +14,6 @@ local Config = {
     ----------------------------------------------
     ---- [[ GENERAL CONFIGURATION OPTIONS ]] -----
     ----------------------------------------------
-    -- This refers to the IP address of the PC ankiconnect is running on
-    -- Remember to expose the port ankiconnect listens on so we can connect to it
-    -- [REQUIRED] The ankiconnect settings also need to be updated to not only listen on the loopback address
-    url = "http://localhost:8765",
     -- [REQUIRED] name of the anki deck
     deckName = "日本::3 - Mining Deck",
     -- [REQUIRED] note type of the notes that should be created
@@ -31,9 +27,6 @@ local Config = {
     allow_dupes = false,
     -- The scope where ankiconnect will look to to find duplicates
     dupe_scope = "deck",
-    -- api key - extra authentication supported by ankiconnect, see https://git.foosoft.net/alex/anki-connect#authentication
-    -- this is totally optional and probably unnecessary, unless you expose anki-connect on the public network for some reason
-    api_key = nil,
 
 
     ----------------------------------------------

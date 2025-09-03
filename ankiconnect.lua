@@ -26,11 +26,7 @@ LuaSocket returns somewhat cryptic errors sometimes
 - user uses HTTPS instead of HTTP -> wantread
 We can prevent this by modifying/adding the scheme when it's wrong/missing
 --]]
-function AnkiConnect:get_url()
-    local url = conf.url:get_value()
-    if self.last_url == url then
-        return (assert(self.valid_url, "URL was not validated yet, we should not get here"))
-    end
+function AnkiConnect.sanitize_url(url)
     local valid_url = url
     local _, scheme_end_idx, scheme, ssl = url:find("^(http(s?)://)")
     if not scheme then
@@ -38,73 +34,59 @@ function AnkiConnect:get_url()
     elseif ssl then
         valid_url = 'http://'..url:sub(scheme_end_idx+1, #url)
     end
-    self.last_url = url
-    self.valid_url = valid_url
     if url ~= valid_url then
         logger.info(("Corrected URL from '%s' to '%s'"):format(url, valid_url))
     end
     return valid_url
 end
 
-function AnkiConnect:with_timeout(timeout, func)
+function AnkiConnect.with_timeout(timeout, func)
     socketutil:set_timeout(timeout)
     local res = { func() } -- store all values returned by function
     socketutil:reset_timeout()
     return unpack(res)
 end
 
-function AnkiConnect:is_running()
+function AnkiConnect:is_running(url)
     if not self.wifi_connected then
         return false, "WiFi disconnected."
     end
-    local result, code, error = self:with_timeout(1, function() return self:post_requestpermission() end)
-    logger.dbg(string.format("AnkiConnect#is_running = code: %s, error: %s, result: %s", code, error, result))
-    return code == 200, string.format("Unable to reach AnkiConnect.\n%s", error or code)
+    return self:post_requestpermission(url)
 end
 
-function AnkiConnect:post_requestpermission()
+function AnkiConnect:get_decknames(url, api_key)
+    local anki_connect_request = { action = "deckNames", version = 6, key = api_key }
+    return self:post_request(anki_connect_request, url, api_key)
+end
+
+function AnkiConnect:post_requestpermission(url)
+    url = url or conf.url:get_value()
     local anki_connect_request = { action = "requestPermission", version = 6 }
-    local json_payload = json.encode(anki_connect_request)
-    local output_sink = {} -- contains data returned by request
-    local request = {
-        url = self:get_url(),
-        method = "POST",
-        headers = {
-            ["Content-Type"] = "application/json",
-            ["Content-Length"] = #json_payload,
-        },
-        sink = ltn12.sink.table(output_sink),
-        source = ltn12.source.string(json_payload),
-    }
-    local code, headers, status = socket.skip(1, http.request(request))
-    logger.dbg(string.format("AnkiConnect#post_requestpermission: code: %s, header: %s, status: %s\n", code, headers, status))
-    local result = table.concat(output_sink)
-    logger.dbg("AnkiConnect#post_requestpermission: result: ", result)
-    return result, code, self:get_requestpermission_error(code, result)
-end
-
-function AnkiConnect:get_requestpermission_error(http_return_code, request_data)
-    if http_return_code ~= 200 then
-        return string.format("Invalid return code: %s.", http_return_code)
-    else
-        local decoded_data = json.decode(request_data)
-        local json_err = decoded_data.error
-        if type(json_err) == "string" then
-            return json_err
-        end
-        if decoded_data.result.permission == "denied" then
-            return "Permission denied."
-        end
+    local result, error = self:post_request(anki_connect_request, url)
+    if error or result.permission == "denied" then
+        return false, error or "Permission denied."
     end
+    return result
 end
 
-function AnkiConnect:post_request(note)
+function AnkiConnect:request_add_note(note)
     local anki_connect_request = { action = "addNote", params = { note = note }, version = 6, key = conf.api_key:get_value() }
-    local json_payload = json.encode(anki_connect_request)
-    logger.dbg("AnkiConnect#post_request: building POST request with payload: ", json_payload)
+    return self:post_request(anki_connect_request, conf.url:get_value(), conf.api_key:get_value())
+end
+
+function AnkiConnect:post_request(request, url, api_key)
+    local json_payload
+    if type(request) == "table" then
+        request.key = api_key
+        json_payload = json.encode(request)
+    else
+        json_payload = request
+    end
+    logger.info(request, url, api_key)
+    logger.info("AnkiConnect#post_request: building POST request with payload: ", json_payload)
     local output_sink = {} -- contains data returned by request
-    local request = {
-        url = self:get_url(),
+    local rest_request = {
+        url = url,
         method = "POST",
         headers = {
             ["Content-Type"] = "application/json",
@@ -113,22 +95,17 @@ function AnkiConnect:post_request(note)
         sink = ltn12.sink.table(output_sink),
         source = ltn12.source.string(json_payload),
     }
-    local code, headers, status = socket.skip(1, http.request(request))
+    local code, headers, status = self.with_timeout(1, function() return socket.skip(1, http.request(rest_request)) end)
     logger.info(string.format("AnkiConnect#post_request: code: %s, header: %s, status: %s\n", code, headers, status))
-    local result = table.concat(output_sink)
-    return result, self:get_request_error(code, result)
-end
-
-function AnkiConnect:get_request_error(http_return_code, request_data)
-    if http_return_code ~= 200 then
-        return string.format("Invalid return code: %s.", http_return_code)
-    else
-        local json_err = json.decode(request_data)['error']
-        -- this turns a json NULL in a userdata instance, actual error will be a string
-        if type(json_err) == "string" then
-            return json_err
-        end
+    if type(code) == "string" then return nil, code end
+    if code ~= 200 then return nil, string.format("Invalid return code: %s.", code) end
+    local response = json.decode(table.concat(output_sink))
+    local json_err = response.error
+    -- this turns a json NULL in a userdata instance, actual error will be a string
+    if type(json_err) == "string" then
+        return nil, json_err
     end
+    return response.result
 end
 
 function AnkiConnect:set_translated_context(_, context)
@@ -199,7 +176,7 @@ function AnkiConnect:sync_offline_notes()
         return
     end
 
-    local can_sync, err = self:is_running()
+    local can_sync, err = self:is_running(conf.url:get_value())
     if not can_sync then
         return self:show_popup(string.format("Synchronizing failed!\n%s", err), 3, true)
     end
@@ -210,7 +187,7 @@ function AnkiConnect:sync_offline_notes()
             errs[callback_err] = errs[callback_err] + 1
         end)
         if sync_ok then
-            local _, request_err = self:post_request(note.data)
+            local _, request_err = self:request_add_note(note.data)
             if request_err then
                 sync_ok = false
                 errs[request_err] = errs[request_err] + 1
@@ -271,14 +248,15 @@ function AnkiConnect:delete_latest_note()
         return
     end
     if latest.state == "online" then
-        local can_sync, err = self:is_running()
+        local can_sync, err = self:is_running(conf.url:get_value())
         if not can_sync then
             return self:show_popup(("Could not delete synced note: %s"):format(err), 3, true)
         end
+        local api_key = conf.api_key:get_value()
         -- don't use rapidjson, the anki note ids are 64bit integers, they are turned into different numbers by the json library
         -- presumably because 32 vs 64 bit architecture
-        local delete_request = ([[{"action": "deleteNotes", "version": 6, "params": {"notes": [%d]} }]]):format(latest.id)
-        local _, err = self:post_request(delete_request)
+        local delete_request = ([[{"action": "deleteNotes", "version": 6, "params": {"notes": [%d]}, "key": %s }]]):format(latest.id, api_key and ([["%s"]]):format(api_key) or "null")
+        local _, err = self:post_request(delete_request, conf.url:get_value())
         if err then
             return self:show_popup(("Couldn't delete note: %s!"):format(err), 3, true)
         end
@@ -310,7 +288,7 @@ function AnkiConnect:add_note(anki_note)
         return self:show_popup(string.format("Error while creating note:\n\n%s", note), 10, true)
     end
 
-    local can_sync, err = self:is_running()
+    local can_sync, err = self:is_running(conf.url:get_value())
     if not can_sync then
         return self:store_offline(note, err)
     end
@@ -330,11 +308,11 @@ function AnkiConnect:add_note(anki_note)
     end)
     if not callback_ok then return end
 
-    local result, request_err = self:post_request(note.data)
+    local result, request_err = self:request_add_note(note.data)
     if request_err then
         return self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
     end
-    self.latest_synced_note = { state = "online", id = json.decode(result).result }
+    self.latest_synced_note = { state = "online", id = result }
     self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
     logger.info("note added succesfully: " .. result)
 end

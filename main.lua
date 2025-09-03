@@ -4,8 +4,10 @@ local CustomContextMenu = require("customcontextmenu")
 local DataStorage = require("datastorage")
 local DictQuickLookup = require("ui/widget/dictquicklookup")
 local InfoMessage = require("ui/widget/infomessage")
+local MultiInputDialog = require("ui/widget/multiinputdialog")
 local LuaSettings = require("luasettings")
 local MenuBuilder = require("menubuilder")
+local NetworkMgr = require("ui/network/manager")
 local RadioButtonWidget = require("ui/widget/radiobuttonwidget")
 local Widget = require("ui/widget/widget")
 local UIManager = require("ui/uimanager")
@@ -131,8 +133,8 @@ function AnkiWidget:buildSettings()
                 if Configuration.profiles[profile] then
                     return UIManager:show(InfoMessage:new { text = "Profile already exists! Pick another name.", timeout = 4 })
                 end
-                Configuration.profiles[profile] = Configuration.Profile:new(profile, DataStorage:getFullDataDir() .. "/plugins/anki.koplugin/profiles/" .. profile .. ".lua", start_data)
-                Configuration.profiles[profile]:init_settings() -- make sure this is backed by a file on disk
+                Configuration.profiles[profile] = LuaSettings:open(DataStorage:getFullDataDir() .. "/plugins/anki.koplugin/profiles/" .. profile .. ".lua")
+                Configuration.profiles[profile].data = start_data
                 if self.ui.menu.menu_items.anki_settings then
                     self.ui.menu.menu_items.anki_settings.sub_item_table = self:buildSettings()
                 else
@@ -145,6 +147,85 @@ function AnkiWidget:buildSettings()
             input_dialog:onShowKeyboard()
         end
     end
+    local function ankiconnect_settings()
+        local conn_settings
+        conn_settings = MultiInputDialog:new{
+            title = _("Connection Settings"),
+            fields = {
+                {
+                    text = Configuration.url:get_value_nodefault() or '',
+                    description = "The anki-connect URL.",
+                    hint = "http://191.268.1.xxx:8765"
+                },
+                {
+                    text = Configuration.api_key:get_value_nodefault() or '',
+                    description = "The (optional) anki-connect API key.",
+                    hint = "You can leave me blank"
+                },
+            },
+            buttons = {
+                {
+                    {
+                        text = _("Cancel"),
+                        id = "close",
+                        callback = function()
+                            UIManager:close(conn_settings)
+                        end
+                    },
+                    {
+                        text = _("Test"),
+                        callback = function()
+                            local function err(msg) return UIManager:show(InfoMessage:new { text = msg, timeout = 4 }) end
+                            local fields = conn_settings:getFields()
+                            local new_url = fields[1]
+                            local new_api_key = fields[2]
+                            if #new_url == 0 then return UIManager:show(InfoMessage:new { text = "Empty URL", timeout = 4 }) end
+                            new_url = AnkiConnect.sanitize_url(new_url)
+
+                            local function when_connected()
+                                local result, error = AnkiConnect:is_running(new_url)
+                                if error then
+                                    return err(("Failed to connect to '%s': %s"):format(new_url, error))
+                                end
+                                if result.permission ~= "granted" then
+                                    return err("Permission not granted")
+                                elseif result.requireApikey then
+                                    if #new_api_key == 0 then
+                                        return err("API key required but not provided!")
+                                    end
+                                    result, error = AnkiConnect:get_decknames(new_url, new_api_key)
+                                    if error then
+                                        return err(("Could not connect: %s"):format(error))
+                                    end
+                                end
+                                return UIManager:show(InfoMessage:new { text = "Connection succesful!", timeout = 4 })
+                            end
+
+                            if NetworkMgr:willRerunWhenOnline(function() when_connected() end) then return end
+                            when_connected()
+                        end
+                    },
+                    {
+                        text = _("Save"),
+                        callback = function()
+                            local fields = conn_settings:getFields()
+                            local new_url = fields[1]
+                            local new_api_key = fields[2]
+                            if new_url ~= Configuration.url:get_value_nodefault() then
+                                Configuration.url:update_value(AnkiConnect.sanitize_url(new_url))
+                            end
+                            if new_api_key ~= Configuration.api_key:get_value_nodefault() then
+                                Configuration.api_key:update_value(new_api_key)
+                            end
+                            UIManager:close(conn_settings)
+                        end
+                    },
+                },
+            },
+        }
+        UIManager:show(conn_settings)
+        conn_settings:onShowKeyboard()
+    end
 
     local profile_names = {}
     for pname,_ in pairs(Configuration.profiles) do table.insert(profile_names, {
@@ -154,7 +235,7 @@ function AnkiWidget:buildSettings()
     end
     local profiles = builder:build()
     local has_profiles = #profiles > 0
-    for idx, menu_item in ipairs(profiles) do
+    for _, menu_item in ipairs(profiles) do
         menu_item.hold_callback = function()
             UIManager:show(ConfirmBox:new{
                 text = "Do you want to delete this profile? This cannot be undone.",
@@ -176,10 +257,14 @@ function AnkiWidget:buildSettings()
     end
     table.insert(profiles, #profiles+1, { text = "Clone profile from ...", enabled_func = function() return has_profiles end, sub_item_table = profile_names })
     table.insert(profiles, #profiles+1, { text = "Create new profile", callback = make_new_profile({}) })
-    local note_count = #self.anki_connect.local_notes
     return {
         { text = ("Edit profiles"), sub_item_table = profiles },
-        { text = ("Sync (%d) offline note(s)"):format(note_count), enabled_func = function() return note_count > 0 end, callback = function() self.anki_connect:sync_offline_notes() end },
+        { text = ("anki-connect settings"), keep_menu_open = true, callback = ankiconnect_settings },
+        {
+            text = ("Sync (%d) offline note(s)"):format(#self.anki_connect.local_notes),
+            enabled_func = function() return #self.anki_connect.local_notes > 0 end,
+            callback = function() self.anki_connect:sync_offline_notes() end
+        },
     }
 end
 
@@ -203,6 +288,7 @@ function AnkiWidget:init()
     self.anki_connect = AnkiConnect:new {
         ui = self.ui
     }
+    self.anki_connect:load_notes()
     self.anki_note = AnkiNote:extend {
         ui = self.ui,
         ext_modules = self.extensions
@@ -292,7 +378,6 @@ function AnkiWidget:handle_events()
     end
 
     self.onReaderReady = function(obj, doc_settings)
-        self.anki_connect:load_notes()
         -- Insert new button in the popup dictionary to allow adding anki cards
         -- TODO disable button if lookup was not contextual
         DictQuickLookup.tweak_buttons_func = function(popup_dict, buttons)

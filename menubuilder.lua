@@ -14,18 +14,6 @@ local dictionary_settings = { "dictionary_settings", "Dictionary Settings" }
 -- 'raw' entries containing the strings displayed in the menu
 -- keys in the list should match the id of the underlying config option
 local menu_entries = {
-    {
-        id = "url",
-        group = general_settings,
-        name = "AnkiConnect URL",
-        description = "The URL anki_connect is listening on.",
-    },
-    {
-        id = "api_key",
-        group = general_settings,
-        name = "AnkiConnect API key",
-        description = "An optional API key to secure the connection.",
-    },
      {
         id = "deckName",
         group = general_settings,
@@ -317,9 +305,7 @@ function MenuBuilder:build()
         local menu_options = {}
         for _, setting in ipairs(config) do
             local user_conf = setting:copy {
-                -- when setting is accessed through the menu setting.default_profile will never be set
-                active_profile = p,
-                used_profile = p
+                active_luasettings = p,
             }
             local idx = menu_entries[setting.id]
             local entry = menu_entries[idx]

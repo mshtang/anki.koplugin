@@ -28,7 +28,7 @@ KOReader plugin enabling Anki note generation for words looked up in the interna
 
 When the plugin has been installed succesfully, there will be an extra button present on the reader's dictionary popup window, allowing the user to create an Anki note.
 
-The plugin can be configured via the menu, under Search (looking glass icon) - Settings - Anki Settings
+The plugin can be configured via the menu, under Search (looking glass icon) - Settings - Anki Settings. This is where you configure the anki-connect URL and optional [API key](https://git.sr.ht/~foosoft/anki-connect#authentication).
 
 
 ![image](https://user-images.githubusercontent.com/34285115/228915515-b6d3eef6-d9e3-4899-9922-db040a29f2b3.png)
