@@ -16,8 +16,13 @@ local forvo = require("forvo")
 local u = require("lua_utils/utils")
 local conf = require("anki_configuration")
 
-local AnkiConnect = {
-    settings_dir = DataStorage:getSettingsDir(),
+local AnkiConnect = require("ui/widget/widget"):extend{
+    -- NetworkMgr func is device dependent, assume it's true when not implemented.
+    wifi_connected = NetworkMgr.isWifiOn and NetworkMgr:isWifiOn() or true,
+    -- contains notes which we could not sync yet
+    local_notes = {},
+    -- path of notes stored locally when WiFi isn't available
+    notes_filename = DataStorage:getSettingsDir() .. "/anki.koplugin_notes.json"
 }
 
 --[[
@@ -340,22 +345,15 @@ function AnkiConnect:load_notes()
             end
         end
     end)
-    logger.dbg(string.format("Loaded %d notes from disk.", #self.local_notes))
+    logger.dbg(("Loaded %d notes from disk."):format(#self.local_notes))
 end
 
--- [[
--- required args:
--- * url: to connect to remote AnkiConnect session
--- * ui: necessary to get context of word in AnkiNote
--- ]]
-function AnkiConnect:new(opts)
-    -- NetworkMgr func is device dependent, assume it's true when not implemented.
-    self.wifi_connected = NetworkMgr.isWifiOn and NetworkMgr:isWifiOn() or true
-    -- contains notes which we could not sync yet
-    self.local_notes = {}
-    -- path of notes stored locally when WiFi isn't available
-    self.notes_filename = self.settings_dir .. "/anki.koplugin_notes.json"
-    return setmetatable({} , { __index = self })
+function AnkiConnect:onNetworkConnected()
+    self.wifi_connected = true
+end
+
+function AnkiConnect:onNetworkDisconnected()
+    self.wifi_connected = false
 end
 
 return AnkiConnect
