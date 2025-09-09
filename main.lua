@@ -138,15 +138,19 @@ function AnkiWidget:show_connection_widget()
                     callback = function()
                         local function err(msg) return UIManager:show(InfoMessage:new { text = msg, timeout = 4 }) end
                         local fields = self.conn_settings:getFields()
-                        local new_url = fields[1]
+                        local new_url, is_https = fields[1], false
                         local new_api_key = fields[2]
                         if #new_url == 0 then return UIManager:show(InfoMessage:new { text = "Empty URL", timeout = 4 }) end
-                        new_url = AnkiConnect.sanitize_url(new_url)
+                        new_url, is_https = AnkiConnect.sanitize_url(new_url)
 
                         local function when_connected()
                             local result, error = AnkiConnect:is_running(new_url)
                             if error then
-                                return err(("Failed to connect to '%s': %s"):format(new_url, error))
+                                local extra_info
+                                if is_https then
+                                    extra_info = "\nYou probably want to use http instead of https."
+                                end
+                                return err(("Failed to connect to '%s': %s%s"):format(new_url, error, extra_info or ''))
                             end
                             if result.permission ~= "granted" then
                                 return err("Permission not granted")

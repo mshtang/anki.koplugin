@@ -36,13 +36,13 @@ function AnkiConnect.sanitize_url(url)
     local _, scheme_end_idx, scheme, ssl = url:find("^(http(s?)://)")
     if not scheme then
         valid_url = 'http://'..url
-    elseif ssl then
-        valid_url = 'http://'..url:sub(scheme_end_idx+1, #url)
+    elseif ssl and #ssl > 0 then
+        valid_url = 'https://'..url:sub(scheme_end_idx+1, #url)
     end
     if url ~= valid_url then
         logger.info(("Corrected URL from '%s' to '%s'"):format(url, valid_url))
     end
-    return valid_url
+    return valid_url, ssl ~= nil
 end
 
 function AnkiConnect.with_timeout(timeout, func)
@@ -56,55 +56,57 @@ function AnkiConnect:is_running(url)
     if not self.wifi_connected then
         return false, "WiFi disconnected."
     end
-    return self:post_requestpermission(url)
-end
-
-function AnkiConnect:get_decknames(url, api_key)
-    local anki_connect_request = { action = "deckNames", version = 6, key = api_key }
-    return self:post_request(anki_connect_request, url, api_key)
-end
-
-function AnkiConnect:post_requestpermission(url)
-    url = url or conf.url:get_value()
     local anki_connect_request = { action = "requestPermission", version = 6 }
-    local result, error = self:post_request(anki_connect_request, url)
+    local result, error = self:POST { payload = anki_connect_request, url = url }
     if error or result.permission == "denied" then
         return false, error or "Permission denied."
     end
     return result
 end
 
-function AnkiConnect:request_add_note(note)
-    local anki_connect_request = { action = "addNote", params = { note = note }, version = 6, key = conf.api_key:get_value() }
-    return self:post_request(anki_connect_request, conf.url:get_value(), conf.api_key:get_value())
+function AnkiConnect:get_decknames(url, api_key)
+    local anki_connect_request = { action = "deckNames", version = 6, key = api_key }
+    return self:POST { payload = anki_connect_request, url = url }
 end
 
-function AnkiConnect:post_request(request, url, api_key)
-    local json_payload
-    if type(request) == "table" then
-        request.key = api_key
-        json_payload = json.encode(request)
-    else
-        json_payload = request
+function AnkiConnect:request_add_note(note)
+    local anki_connect_request = { action = "addNote", params = { note = note }, version = 6, key = conf.api_key:get_value() }
+    return self:POST { payload = anki_connect_request, url = conf.url:get_value() }
+end
+
+function AnkiConnect:POST(opts)
+    local payload = assert(opts.payload, "Missing payload!")
+    if type(payload) ~= "string" then
+        if opts.api_key then
+            payload.key = opts.api_key
+        end
+        payload = json.encode(payload)
     end
-    logger.info(request, url, api_key)
-    logger.info("AnkiConnect#post_request: building POST request with payload: ", json_payload)
-    local output_sink = {} -- contains data returned by request
-    local rest_request = {
+    local headers = {
+        ["Content-Type"] = "application/json",
+        ["Content-Length"] = #payload,
+    }
+    local url = assert(opts.url, "Missing URL!")
+    local scheme, basic_auth, host = url:match("^(https?://)([^:]+:[^@]+)@(.+)")
+    if basic_auth then
+        headers["Authorization"] = "Basic " .. forvo.base64e(basic_auth)
+        url = scheme .. host
+    end
+    local sink = {}
+    local req = {
         url = url,
         method = "POST",
-        headers = {
-            ["Content-Type"] = "application/json",
-            ["Content-Length"] = #json_payload,
-        },
-        sink = ltn12.sink.table(output_sink),
-        source = ltn12.source.string(json_payload),
+        headers = headers,
+        sink = ltn12.sink.table(sink),
+        source = ltn12.source.string(payload)
     }
-    local code, headers, status = self.with_timeout(1, function() return socket.skip(1, http.request(rest_request)) end)
-    logger.info(string.format("AnkiConnect#post_request: code: %s, header: %s, status: %s\n", code, headers, status))
-    if type(code) == "string" then return nil, code end
-    if code ~= 200 then return nil, string.format("Invalid return code: %s.", code) end
-    local response = json.decode(table.concat(output_sink))
+    logger.dbg("AnkiConnect#POST request:", req)
+    local status_code, response_headers, status = self.with_timeout(1, function() return socket.skip(1, http.request(req)) end)
+    logger.dbg("AnkiConnect#POST response:", status_code, response_headers, status)
+
+    if type(status_code) == "string" then return nil, status_code end
+    if status_code ~= 200 then return nil, string.format("Invalid return code: %s.", status_code) end
+    local response = json.decode(table.concat(sink))
     local json_err = response.error
     -- this turns a json NULL in a userdata instance, actual error will be a string
     if type(json_err) == "string" then
@@ -261,7 +263,7 @@ function AnkiConnect:delete_latest_note()
         -- don't use rapidjson, the anki note ids are 64bit integers, they are turned into different numbers by the json library
         -- presumably because 32 vs 64 bit architecture
         local delete_request = ([[{"action": "deleteNotes", "version": 6, "params": {"notes": [%d]}, "key": %s }]]):format(latest.id, api_key and ([["%s"]]):format(api_key) or "null")
-        local _, err = self:post_request(delete_request, conf.url:get_value())
+        local _, err = self:POST { payload = delete_request, url = conf.url:get_value() }
         if err then
             return self:show_popup(("Couldn't delete note: %s!"):format(err), 3, true)
         end
