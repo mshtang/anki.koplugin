@@ -234,7 +234,7 @@ function AnkiWidget:buildSettings()
     local profile_names = {}
     for pname,_ in pairs(Configuration.profiles) do table.insert(profile_names, {
         text = pname,
-        callback = make_new_profile(Configuration.profiles[pname].data)
+        callback = make_new_profile(util.tableDeepCopy(Configuration.profiles[pname].data))
     })
     end
     local profiles = builder:build()
