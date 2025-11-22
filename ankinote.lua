@@ -173,6 +173,9 @@ function AnkiNote:get_definition()
 end
 
 function AnkiNote:build()
+    if self.is_highlight_note then
+        return self:build_highlight_note()
+    end
     local fields = {
         [conf.word_field:get_value()] = self.popup_dict.word,
         [conf.def_field:get_value()] = self:get_definition()
@@ -221,6 +224,39 @@ function AnkiNote:build()
         },
         -- used as id to detect duplicates when storing notes offline
         identifier = conf.word_field:get_value()
+    }
+end
+
+function AnkiNote:build_highlight_note()
+    local context = self:get_word_context() or self.popup_dict.word
+    local fields = {
+        [conf.word_field:get_value()] = "",
+        [conf.def_field:get_value()] = "",
+    }
+    local optional_fields = {
+        [conf.context_field] = function() return context end,
+        [conf.meta_field]    = function() return self:get_metadata() end,
+    }
+    for opt,fn in pairs(optional_fields) do
+        local field_name = opt:get_value()
+        if field_name then
+            fields[field_name] = fn()
+        end
+    end
+    local note = {
+        deckName = conf.deckName:get_value(),
+        modelName = conf.modelName:get_value(),
+        fields = fields,
+        options = {
+            allowDuplicate = conf.allow_dupes:get_value(),
+            duplicateScope = conf.dupe_scope:get_value(),
+        },
+        tags = self.tags,
+    }
+    return {
+        data = note,
+        field_callbacks = {},
+        identifier = conf.word_field:get_value(),
     }
 end
 
@@ -313,6 +349,23 @@ function AnkiNote:new(popup_dict)
         note:init_context_buffer(note.context_size)
         note:set_custom_context(tonumber(conf.prev_sentence_count:get_value()), 0, tonumber(conf.next_sentence_count:get_value()), 0)
     end
+    return note
+end
+
+function AnkiNote:new_from_highlight(selected_text)
+    local selected = selected_text and util.cleanupSelectedText(selected_text.text) or ""
+    local popup_dict = {
+        word = selected,
+        results = { {
+            dict = "Highlight",
+            definition = selected,
+            is_html = false,
+        } },
+        dict_index = 1,
+        window_list = { { word = selected } },
+    }
+    local note = self:new(popup_dict)
+    note.is_highlight_note = true
     return note
 end
 

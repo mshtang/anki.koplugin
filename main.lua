@@ -412,6 +412,26 @@ function AnkiWidget:handle_events()
             }
             table.insert(buttons, 1, { self.add_to_anki_btn })
         end
+        if self.ui.highlight and self.ui.highlight.addToHighlightDialog then
+            self.ui.highlight:addToHighlightDialog("20_add_to_anki", function(highlight)
+                return {
+                    text = _("Add to Anki"),
+                    enabled = highlight.selected_text ~= nil,
+                    callback = function()
+                        self:set_profile(function()
+                            self:check_conn(function()
+                                if not highlight.selected_text or #highlight.selected_text.text == 0 then
+                                    return UIManager:show(InfoMessage:new { text = "No text selected.", timeout = 3 })
+                                end
+                                self.current_note = AnkiNote:new_from_highlight(highlight.selected_text)
+                                AnkiConnect:add_note(self.current_note)
+                            end)
+                        end)
+                        highlight:onClose()
+                    end,
+                }
+            end)
+        end
         local filepath = doc_settings.data.doc_path
         self:extend_doc_settings(filepath, self.ui.bookinfo:getDocProps(filepath, doc_settings.doc_props))
     end
