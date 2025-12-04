@@ -376,6 +376,25 @@ function AnkiWidget:set_profile(callback)
     }
 end
 
+function AnkiWidget:mark_add_to_anki_button()
+    self.add_to_anki_marked = true
+end
+
+function AnkiWidget:add_note_with_feedback(note_builder)
+    self:set_profile(function()
+        self:check_conn(function()
+            local note = note_builder()
+            if not note then
+                return
+            end
+            local ok = AnkiConnect:add_note(note)
+            if ok then
+                self:mark_add_to_anki_button()
+            end
+        end)
+    end)
+end
+
 function AnkiWidget:handle_events()
     -- these all return false so that the event goes up the chain, other widgets might wanna react to these events
     self.onCloseWidget = function()
@@ -391,16 +410,18 @@ function AnkiWidget:handle_events()
         -- Insert new button in the popup dictionary to allow adding anki cards
         -- TODO disable button if lookup was not contextual
         DictQuickLookup.tweak_buttons_func = function(popup_dict, buttons)
+            self.add_to_anki_marked = false
             self.add_to_anki_btn = {
                 id = "add_to_anki",
                 text = _("Add to Anki"),
                 font_bold = true,
+                checked_func = function()
+                    return self.add_to_anki_marked or false
+                end,
                 callback = function()
-                    self:set_profile(function()
-                        self:check_conn(function()
-                            self.current_note = AnkiNote:new(popup_dict)
-                            AnkiConnect:add_note(self.current_note)
-                        end)
+                    self:add_note_with_feedback(function()
+                        self.current_note = AnkiNote:new(popup_dict)
+                        return self.current_note
                     end)
                 end,
                 hold_callback = function()
@@ -418,14 +439,13 @@ function AnkiWidget:handle_events()
                     text = _("Add to Anki"),
                     enabled = highlight.selected_text ~= nil,
                     callback = function()
-                        self:set_profile(function()
-                            self:check_conn(function()
-                                if not highlight.selected_text or #highlight.selected_text.text == 0 then
-                                    return UIManager:show(InfoMessage:new { text = "No text selected.", timeout = 3 })
-                                end
-                                self.current_note = AnkiNote:new_from_highlight(highlight.selected_text)
-                                AnkiConnect:add_note(self.current_note)
-                            end)
+                        self:add_note_with_feedback(function()
+                            if not highlight.selected_text or #highlight.selected_text.text == 0 then
+                                UIManager:show(InfoMessage:new { text = "No text selected.", timeout = 3 })
+                                return nil
+                            end
+                            self.current_note = AnkiNote:new_from_highlight(highlight.selected_text)
+                            return self.current_note
                         end)
                         highlight:onClose()
                     end,
@@ -451,16 +471,18 @@ function AnkiWidget:onDictButtonsReady(popup_dict, buttons)
     if self.ui.vocabbuilder and UIManager:isWidgetShown(self.ui.vocabbuilder.widget) then
         return
     end
+    self.add_to_anki_marked = false
     self.add_to_anki_btn = {
         id = "add_to_anki",
         text = _("Add to Anki"),
         font_bold = true,
+        checked_func = function()
+            return self.add_to_anki_marked or false
+        end,
         callback = function()
-            self:set_profile(function()
-                self:check_conn(function()
-                    self.current_note = AnkiNote:new(popup_dict)
-                    AnkiConnect:add_note(self.current_note)
-                end)
+            self:add_note_with_feedback(function()
+                self.current_note = AnkiNote:new(popup_dict)
+                return self.current_note
             end)
         end,
         hold_callback = function()

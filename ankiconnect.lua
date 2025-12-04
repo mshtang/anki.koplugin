@@ -292,7 +292,8 @@ end
 function AnkiConnect:add_note(anki_note)
     local ok, note = pcall(anki_note.build, anki_note)
     if not ok then
-        return self:show_popup(string.format("Error while creating note:\n\n%s", note), 10, true)
+        self:show_popup(string.format("Error while creating note:\n\n%s", note), 10, true)
+        return false, "build_failed"
     end
 
     local can_sync, err = self:is_running(conf.url:get_value())
@@ -313,27 +314,31 @@ function AnkiConnect:add_note(anki_note)
     local callback_ok = self:handle_callbacks(note, function(callback_err)
         return self:show_popup(string.format("Error while handling callbacks:\n\n%s", callback_err), 3, true)
     end)
-    if not callback_ok then return end
+    if not callback_ok then return false, "callback_failed" end
 
     local result, request_err = self:request_add_note(note.data)
     if request_err then
-        return self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
+        self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
+        return false, "sync_failed"
     end
     self.latest_synced_note = { state = "online", id = result }
     self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
     logger.info("note added succesfully: " .. result)
+    return true, "online"
 end
 
 function AnkiConnect:store_offline(note, reason, show_always)
     local id = note.data.fields[note.identifier]
     if self.local_notes[id] and not note.data.options.allowDuplicate then
-        return self:show_popup("Cannot store duplicate note offline!", 6, true)
+        self:show_popup("Cannot store duplicate note offline!", 6, true)
+        return false, "duplicate_offline"
     end
     self.local_notes[id] = true
     table.insert(self.local_notes, note)
     u.open_file(self.notes_filename, 'a', function(f) f:write(json.encode(note) .. '\n') end)
     self.latest_synced_note = { state = "offline", id = id }
-    return self:show_popup(string.format("%s\nStored note offline", reason), 3, show_always or false)
+    self:show_popup(string.format("%s\nStored note offline", reason), 3, show_always or false)
+    return true, "offline"
 end
 
 function AnkiConnect:load_notes()
