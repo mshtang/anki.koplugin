@@ -6,7 +6,7 @@ return {
     ["def_field"] = "UsageNotes",
     ["dupe_scope"] = "deck",
     ["enabled_extensions"] = {"EXT_clear_def_field.lua"},
-    ["modelName"] = "German",
+    ["modelName"] = "German Sentence",
     ["next_sentence_count"] = 1,
     ["prev_sentence_count"] = 1,
     ["word_field"] = "CoreWord",

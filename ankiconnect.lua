@@ -21,9 +21,26 @@ local AnkiConnect = require("ui/widget/widget"):extend{
     wifi_connected = NetworkMgr.isWifiOn and NetworkMgr:isWifiOn() or true,
     -- contains notes which we could not sync yet
     local_notes = {},
+    -- fingerprints of notes stored offline (all fields match)
+    local_note_fingerprints = {},
+    -- fingerprints of every note we've created this session (offline or synced)
+    known_fingerprints = {},
     -- path of notes stored locally when WiFi isn't available
     notes_filename = DataStorage:getSettingsDir() .. "/anki.koplugin_notes.json"
 }
+
+-- Build a deterministic fingerprint for a note based on all of its fields.
+-- Notes are considered identical only when this fingerprint matches.
+local function fingerprint_fields(fields)
+    local keys, parts = {}, {}
+    for k in pairs(fields or {}) do table.insert(keys, k) end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        parts[#parts+1] = ("%s=%s"):format(k, tostring(fields[k] or ""))
+    end
+    -- Use a non-printable separator to avoid collisions with user text.
+    return table.concat(parts, "\0")
+end
 
 --[[
 LuaSocket returns somewhat cryptic errors sometimes
@@ -50,6 +67,13 @@ function AnkiConnect.with_timeout(timeout, func)
     local res = { func() } -- store all values returned by function
     socketutil:reset_timeout()
     return unpack(res)
+end
+
+function AnkiConnect:note_fingerprint(note, recompute)
+    if recompute or not note.fingerprint then
+        note.fingerprint = fingerprint_fields(note.data and note.data.fields or {})
+    end
+    return note.fingerprint
 end
 
 function AnkiConnect:is_running(url)
@@ -193,16 +217,25 @@ function AnkiConnect:sync_offline_notes()
         local sync_ok = self:handle_callbacks(note, function(callback_err)
             errs[callback_err] = errs[callback_err] + 1
         end)
+        local fingerprint = self:note_fingerprint(note, true)
         if sync_ok then
             local _, request_err = self:request_add_note(note.data)
             if request_err then
                 sync_ok = false
                 errs[request_err] = errs[request_err] + 1
+            else
+                self.known_fingerprints[fingerprint] = true
+                self.local_note_fingerprints[fingerprint] = nil
             end
         end
         table.insert(sync_ok and synced or failed, note)
     end
     self.local_notes = failed
+    self.local_note_fingerprints = {}
+    for _, note in ipairs(self.local_notes) do
+        local fp = self:note_fingerprint(note)
+        self.local_note_fingerprints[fp] = true
+    end
     local failed_as_json = {}
     for _,note in ipairs(failed) do
         table.insert(failed_as_json, json.encode(note))
@@ -233,6 +266,7 @@ function AnkiConnect:sync_offline_notes()
             ok_callback = function()
                 os.remove(self.notes_filename)
                 self.local_notes = {}
+                self.local_note_fingerprints = {}
             end
         })
     end
@@ -268,9 +302,15 @@ function AnkiConnect:delete_latest_note()
             return self:show_popup(("Couldn't delete note: %s!"):format(err), 3, true)
         end
         self:show_popup(("Removed note (id: %s)"):format(latest.id), 3, true)
+        if latest.fingerprint then
+            self.known_fingerprints[latest.fingerprint] = nil
+        end
     else
         table.remove(self.local_notes, #self.local_notes)
-        self.local_notes[latest.id] = nil
+        if latest.fingerprint then
+            self.local_note_fingerprints[latest.fingerprint] = nil
+            self.known_fingerprints[latest.fingerprint] = nil
+        end
         local entries_on_disk = {}
         u.open_file(self.notes_filename, 'r', function(f)
             for line in f:lines() do
@@ -316,12 +356,19 @@ function AnkiConnect:add_note(anki_note)
     end)
     if not callback_ok then return false, "callback_failed" end
 
+    local fingerprint = self:note_fingerprint(note, true)
+    if self.local_note_fingerprints[fingerprint] or self.known_fingerprints[fingerprint] then
+        self:show_popup("Identical note already exists; skipping duplicate.", 6, true)
+        return false, "duplicate_note"
+    end
+
     local result, request_err = self:request_add_note(note.data)
     if request_err then
         self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
         return false, "sync_failed"
     end
-    self.latest_synced_note = { state = "online", id = result }
+    self.known_fingerprints[fingerprint] = true
+    self.latest_synced_note = { state = "online", id = result, fingerprint = fingerprint }
     self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
     logger.info("note added succesfully: " .. result)
     return true, "online"
@@ -329,27 +376,42 @@ end
 
 function AnkiConnect:store_offline(note, reason, show_always)
     local id = note.data.fields[note.identifier]
-    if self.local_notes[id] and not note.data.options.allowDuplicate then
-        self:show_popup("Cannot store duplicate note offline!", 6, true)
+    local fingerprint = self:note_fingerprint(note, true)
+    if self.local_note_fingerprints[fingerprint] or self.known_fingerprints[fingerprint] then
+        self:show_popup("Identical note already stored offline!", 6, true)
         return false, "duplicate_offline"
     end
-    self.local_notes[id] = true
+    self.local_note_fingerprints[fingerprint] = true
+    self.known_fingerprints[fingerprint] = true
     table.insert(self.local_notes, note)
     u.open_file(self.notes_filename, 'a', function(f) f:write(json.encode(note) .. '\n') end)
-    self.latest_synced_note = { state = "offline", id = id }
+    self.latest_synced_note = { state = "offline", id = id, fingerprint = fingerprint }
     self:show_popup(string.format("%s\nStored note offline", reason), 3, show_always or false)
     return true, "offline"
 end
 
 function AnkiConnect:load_notes()
+    self.local_notes = {}
+    self.local_note_fingerprints = {}
     u.open_file(self.notes_filename, 'r', function(f)
         for note_json in f:lines() do
             local note, err = json.decode(note_json)
             assert(note, ("Could not parse note '%s': %s"):format(note_json, err))
-            table.insert(self.local_notes, note)
-            if note.identifier then
-                self.local_notes[note.data.fields[note.identifier]] = true
+            local fingerprint = self:note_fingerprint(note, true)
+            if not self.local_note_fingerprints[fingerprint] then
+                table.insert(self.local_notes, note)
+                self.local_note_fingerprints[fingerprint] = true
+                self.known_fingerprints[fingerprint] = true
+            else
+                logger.info("Skipped duplicate offline note (all fields match).")
             end
+        end
+    end)
+    -- rewrite file to drop duplicates (if any were skipped)
+    u.open_file(self.notes_filename, 'w', function(f)
+        for idx, note in ipairs(self.local_notes) do
+            f:write(json.encode(note))
+            f:write('\n')
         end
     end)
     logger.dbg(("Loaded %d notes from disk."):format(#self.local_notes))
