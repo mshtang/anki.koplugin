@@ -54,8 +54,25 @@ function AnkiNote:get_word_context()
     end
     local provider = self.ui.document.provider
     if self.ui.document.getSelectedWordContext then
-        local before, after = self:get_custom_context(unpack(self.context))
-        return before .. "<b>" .. self.popup_dict.word .. "</b>" .. after
+        local function count_words(text)
+            -- strip simple HTML tags before counting
+            local cleaned = text:gsub("<.->", " ")
+            local n = 0
+            for _ in cleaned:gmatch("%S+") do n = n + 1 end
+            return n
+        end
+
+        local pre_s, pre_c, post_s, post_c = unpack(self.context)
+        local before, after = self:get_custom_context(pre_s, pre_c, post_s, post_c)
+        local context = before .. "<b>" .. self.popup_dict.word .. "</b>" .. after
+
+        -- Auto-extend short contexts when user requests one prev/next sentence
+        if pre_s == 1 and post_s == 1 and count_words(context) < 10 then
+            local ext_before, ext_after = self:get_custom_context(pre_s + 1, pre_c, post_s + 1, post_c)
+            context = ext_before .. "<b>" .. self.popup_dict.word .. "</b>" .. ext_after
+        end
+
+        return context
     elseif provider == "mupdf" then -- CBZ
         local ocr_text = self.ui['Mokuro'] and self.ui['Mokuro']:get_selection()
         logger.info("selected text: ", ocr_text)
