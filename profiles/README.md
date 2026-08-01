@@ -41,11 +41,10 @@ local Config = {
     -- Translation of the context field
     translated_context_field = "SentEng",
 
-    -- Amount of sentences which are prepended to the word looked up. Set this to 1 to complete the current sentence.
-    prev_sentence_count = 1,
-
-    -- Amount of sentences which are appended to the word looked up. Set this to 1 to complete the current sentence.
-    next_sentence_count = 1,
+    -- How much of the surrounding text ends up in the context field is worked out
+    -- automatically. This can be tuned per profile (min_context_words,
+    -- max_context_sentences, sentence_terminators, quotation_marks, abbreviations);
+    -- see "Context extraction" in the main README for what they do and their defaults.
 
     -- [REQUIRED] The field name where the dictionary definition will be sent to.
     def_field = "VocabDef",

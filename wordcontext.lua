@@ -344,6 +344,8 @@ end
 
 -- Words, as far as a card is concerned: quote marks and […] don't count. Japanese
 -- and Chinese don't separate words by spaces, so two of their characters count as one.
+-- Korean is CJK too, but is already space-separated like any alphabet, so a token
+-- holding Hangul counts once, the same as a Latin, Cyrillic or Arabic token.
 local function count_words(s, from, to)
     if not s or (from and to and to < from) then return 0 end
     local text = from and sub(s, from, to) or s
@@ -353,7 +355,7 @@ local function count_words(s, from, to)
         for _ in token:gmatch("[\227-\233\239]") do cjk = cjk + 1 end
         if cjk > 0 then
             n = n + cjk / 2
-        elseif find(token, "%w") or find(token, "[\195-\223]") then
+        elseif find(token, "%w") or find(token, "[\195-\223]") or find(token, "[\234-\237]") then
             n = n + 1
         end
     end
