@@ -14,7 +14,6 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Screen = Device.screen
-local config = require("anki_configuration")
 
 local CustomContextMenu = FocusManager:extend{}
 
@@ -184,13 +183,17 @@ function CustomContextMenu:reset()
     self:reset_next()
 end
 
+-- picking the context by hand starts from the sentence the word occured in; the
+-- automatic extension does not apply here, what you pick is what you get
+local DEFAULT_SENTENCE_COUNT = 1
+
 function CustomContextMenu:reset_prev()
-    self.prev_s_cnt = tonumber(config.prev_sentence_count:get_value())
+    self.prev_s_cnt = DEFAULT_SENTENCE_COUNT
     self.prev_c_cnt = 0
 end
 
 function CustomContextMenu:reset_next()
-    self.next_s_cnt = tonumber(config.next_sentence_count:get_value())
+    self.next_s_cnt = DEFAULT_SENTENCE_COUNT
     self.next_c_cnt = 0
 end
 

@@ -49,14 +49,9 @@ These settings are configured via a user profile, see [Profiles](profiles/README
   #### Selected word (`word_field`)
   The word selected in the book.
   #### Sentence context (`context_field`)
-  The full sentence that the word occured in, extracted from the book.
+  The full sentence that the word occured in, extracted from the book. See [Context extraction](#context-extraction) for how much text ends up here.
   #### Translated Sentence (`translated_context_field`)
   The translation of the sentence context mentioned above. The target language is inherited from the translation settings in KOReader itself.
-  #### Previous sentence count (`prev_sentence_count`)
-  Define the amount of sentences which should be prepended to the word you looked up. Set this to `1` to have it complete the sentence the word occured in.
-  #### Next sentence count (`next_sentence_count`)
-  Define the amount of sentences which should be appended to the word you looked up. Set this to `1` to have it complete the sentence the word occured in.
-  
   
   The exact context stored can be modified by pressing and holding the 'Add to Anki' button, and choosing the 'custom context' entry on the menu that pops up.
   
@@ -71,6 +66,40 @@ These settings are configured via a user profile, see [Profiles](profiles/README
   
   The pattern expects filenames with the following format: `[Author]_Title_[extra_info].epub`. The extension can be anything.
 </details>
+
+### Context extraction
+
+The note gets the sentence the word occured in. Because a single sentence is sometimes
+too little to tell a polysemous word apart (and a speech tag like `Peter stockte.` says
+nothing at all), that sentence is extended with whole neighbouring sentences until it
+holds at least `min_context_words` words, and never beyond `max_context_sentences`
+sentences. Sentences before the word are added first, then ones after it, then one
+paragraph back, then one forward. Two Chinese or Japanese characters count as one word.
+
+Paragraph breaks are kept and shown as a line break, so two speakers never end up on the
+same line.
+
+Quotations are always shown complete: when the chosen text starts or ends inside one, the
+opening and closing marks are printed even though they fall outside it, and the part of
+the quotation that was left out is marked with `[…]`, so the card never pretends to be
+the full quote.
+
+```
+» […] Aber ich hoffe, dass ihr diejenigen sehr schnell ausfindig machen werdet …«
+»Das heißt, dass die beiden zwar weggetreten waren, aber noch Vitalfunktionen hatten. […]«
+```
+
+Which characters do the work is a property of the language and of the publisher, so it is
+configurable per profile: `sentence_terminators`, `quotation_marks` (listed in pairs:
+opening mark, closing mark, opening mark, ...) and `abbreviations`. The defaults cover
+German (`»…«`, `„…“`, `›…‹`) and Japanese (`「…」`, `『…』`). Books using `“…”` or `‘…’`
+need those added, and books using straight `"` can't be handled by pairing at all - leave
+them out and only the sentence rules apply.
+
+A full stop is not treated as the end of a sentence when it follows an abbreviation, a
+single letter (`z. B.`, `S. 42`, `A. Schmidt`) or a number (`18. Jahrhundert`,
+`13.30 Uhr`), or when the next word is lowercase (`»Wirklich?« fragte er`). `?!`, `!!!`,
+`...` and `…` count once.
 
 ### Offline usage
 Notes are saved locally on the device when the remotely running Anki isn't available. When it becomes available again, the user will be reminded they have unsynced notes. 

@@ -10,6 +10,7 @@ local config = require("anki_configuration")
 local general_settings = { "generic_settings", "General Settings" }
 local note_settings = { "note_settings", "Anki Note Settings" }
 local dictionary_settings = { "dictionary_settings", "Dictionary Settings" }
+local context_settings = { "context_settings", "Context Settings" }
 
 -- 'raw' entries containing the strings displayed in the menu
 -- keys in the list should match the id of the underlying config option
@@ -98,16 +99,34 @@ local menu_entries = {
         default_values = function(self) return self.extensions end,
     },
     {
-        id = "prev_sentence_count",
-        group = note_settings,
-        name = "Previous Sentence Count",
-        description = "Amount of sentences to prepend to the word looked up.",
+        id = "min_context_words",
+        group = context_settings,
+        name = "Minimum Context Length",
+        description = "The sentence the word occured in is extended with further sentences until it holds at least this many words. Two Chinese or Japanese characters count as one word.",
     },
     {
-        id = "next_sentence_count",
-        group = note_settings,
-        name = "Next Sentence Count",
-        description = "Amount of sentences to append to the word looked up.",
+        id = "max_context_sentences",
+        group = context_settings,
+        name = "Maximum Context Length",
+        description = "Never put more than this many sentences on a note, even when the minimum length was not reached yet.",
+    },
+    {
+        id = "sentence_terminators",
+        group = context_settings,
+        name = "Sentence Enders",
+        description = "Characters that end a sentence. A full stop after an abbreviation, an ordinal ('18. Jahrhundert') or inside a longer sentence ('»Wirklich?« fragte er') does not count.",
+    },
+    {
+        id = "quotation_marks",
+        group = context_settings,
+        name = "Quotation Marks",
+        description = "Quotation marks used by your books, listed in pairs: opening mark, closing mark, opening mark, ... Marks are always completed on the note, and text left out inside a quotation is marked with […].",
+    },
+    {
+        id = "abbreviations",
+        group = context_settings,
+        name = "Abbreviations",
+        description = "Words that are followed by a full stop without ending the sentence, separated by spaces. Single letters ('z. B.', 'S. 42') and numbers are recognized without being listed.",
     },
     --[[ TODO: we may wanna move this to the extension and insert it back in the menu somehow
      {
@@ -318,7 +337,7 @@ function MenuBuilder:build()
         -- contains data as expected to be passed along to main config widget
         local sub_item_table = {}
         local grouping_func = function(x) return x.group[2] end
-        local group_order = { ["General Settings"] = 1, ["Anki Note Settings"] = 2, ["Dictionary Settings"] = 3 }
+        local group_order = { ["General Settings"] = 1, ["Anki Note Settings"] = 2, ["Dictionary Settings"] = 3, ["Context Settings"] = 4 }
         for group, group_entries in pairs(List:new(menu_options):group_by(grouping_func):get()) do
             local menu_group = {}
             for _,opt in ipairs(group_entries) do

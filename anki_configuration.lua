@@ -1,6 +1,7 @@
 local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
 local lfs = require("libs/libkoreader-lfs")
+local WordContext = require("wordcontext")
 
 
 --[[
@@ -80,8 +81,11 @@ local Configuration = {
     Setting:new{ id = 'audio_field' },
     Setting:new{ id = 'image_field' },
     Setting:new{ id = 'translated_context_field' },
-    Setting:new{ id = 'prev_sentence_count', default = '1' },
-    Setting:new{ id = 'next_sentence_count', default = '1' },
+    Setting:new{ id = 'min_context_words',     default = WordContext.DEFAULTS.min_words },
+    Setting:new{ id = 'max_context_sentences', default = WordContext.DEFAULTS.max_sentences },
+    Setting:new{ id = 'sentence_terminators',  default = WordContext.DEFAULTS.terminators },
+    Setting:new{ id = 'quotation_marks',       default = WordContext.DEFAULTS.quotes },
+    Setting:new{ id = 'abbreviations',         default = WordContext.DEFAULTS.abbreviations },
 }
 for _,s in ipairs(Configuration) do
     Configuration[s.id] = s
