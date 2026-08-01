@@ -32,6 +32,10 @@ end
 
 function CustomContextMenu:init()
     self:reset() -- first call is just for initializing
+    -- best effort: falls back to no lang attribute when it can't be determined
+    -- (e.g. neither the dictionary nor the document have it set)
+    local ok, lang = pcall(function() return self.note:get_language() end)
+    self.lang = ok and lang or nil
     self.font_size = 19
     local screen_width = Screen:getWidth()
     local screen_height = Screen:getHeight()
@@ -214,8 +218,9 @@ function CustomContextMenu:update_context()
             font-family: 'Noto Sans CJK';
         }
     ]]
-    local context_fmt = '<div lang="ja"><p>%s<h2 class="lookupword">%s</h2>%s</p></div>'
-    local context = context_fmt:format(prev, self.note.popup_dict.word, next_)
+    local lang_attr = self.lang and (' lang="%s"'):format(self.lang) or ''
+    local context_fmt = '<div%s><p>%s<h2 class="lookupword">%s</h2>%s</p></div>'
+    local context = context_fmt:format(lang_attr, prev, self.note.popup_dict.word, next_)
 
     self[1]:free()
     self.scroll_widget.htmlbox_widget:setContent(context, css, Screen:scaleBySize(self.font_size))

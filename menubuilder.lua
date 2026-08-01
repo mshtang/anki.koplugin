@@ -85,7 +85,7 @@ local menu_entries = {
         description = "Anki field to store Forvo audio in.",
     },
      {
-        id = "img_field",
+        id = "image_field",
         group = note_settings,
         name = "Image Field",
         description = "Anki field to store image in (used for CBZ only).",
