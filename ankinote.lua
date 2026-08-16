@@ -254,6 +254,10 @@ function AnkiNote:build_word_note()
         },
         -- used as id to detect duplicates when storing notes offline
         identifier = conf.word_field:get_value(),
+        -- which field holds the passage. Kept with the note rather than looked up when
+        -- it is needed: a queued note can be made under one profile and looked at under
+        -- another, and the field names are the profile's, not the note's.
+        context_field = conf.context_field:get_value(),
         -- the book this came from: a queued note outlives the session that made it, and
         -- dropping it again means taking its fingerprint back out of that book's sidecar
         doc_path = self.ui.document.file,
@@ -290,6 +294,7 @@ function AnkiNote:build_highlight_note()
         data = note,
         field_callbacks = {},
         identifier = conf.word_field:get_value(),
+        context_field = conf.context_field:get_value(),
         doc_path = self.ui.document.file,
     }
 end

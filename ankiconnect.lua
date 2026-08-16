@@ -125,10 +125,6 @@ end
 -- already carries around: the fingerprints follow the book when it is renamed or moved,
 -- and go away with it when it is deleted, so nothing has to be capped or swept up.
 --
--- A fingerprint maps to the id of the Anki note it made, which is what lets its passage
--- be rewritten later. `true` stands for a note whose id we don't have: one still waiting
--- in the offline queue, or one made before the ids were kept.
---
 -- They are written by reference. The reader flushes the sidecar when the book is closed,
 -- when KOReader is restarted or suspended, and on its own timer (15 minutes by default),
 -- so there is nothing to write out here.
@@ -146,44 +142,86 @@ function AnkiConnect:unload_fingerprints()
 end
 
 --[[
--- Undo of the above, for a note that was thrown away again. The queue is shared by every
--- book, so the note being dropped is not necessarily one of the book being read: when it
--- is not, its book is opened just far enough to take the fingerprint back out. Its sidecar
--- is written right away, since nothing else is going to flush it for us.
+-- The fingerprints of a book, plus the way to write them back. The book being read has
+-- its table held open and the reader flushes it, so writing it back is a no-op; any
+-- other book is opened just far enough to be looked at, and nothing else is going to
+-- flush that, so the caller has to.
 --]]
-function AnkiConnect:forget_fingerprint(fingerprint, doc_path)
-    if not doc_path then
-        return -- queued by a version that did not record where the note came from
-    end
-    if doc_path == self.fingerprints_doc_path then
-        self.known_fingerprints[fingerprint] = nil
-        return
+function AnkiConnect:fingerprints_for(doc_path)
+    -- A note queued before the book it came from was recorded is taken to be the book
+    -- being read: that is where it came from in all but the odd case, and it is the only
+    -- book we could do anything about anyway. Being wrong costs nothing - a fingerprint
+    -- is a word and the passage around it, so another book having the very same one
+    -- means it really is the same note.
+    if not doc_path or doc_path == self.fingerprints_doc_path then
+        return self.known_fingerprints, function() end
     end
     local doc_settings = DocSettings:open(doc_path)
-    local fingerprints = doc_settings:readSetting(FINGERPRINTS_KEY)
+    return doc_settings:readSetting(FINGERPRINTS_KEY, {}), function() doc_settings:flush() end
+end
+
+function AnkiConnect:forget_fingerprint(fingerprint, doc_path)
+    local fingerprints, flush = self:fingerprints_for(doc_path)
     if fingerprints and fingerprints[fingerprint] then
         fingerprints[fingerprint] = nil
-        doc_settings:flush()
+        flush()
     end
+end
+
+function AnkiConnect:remember_fingerprint(fingerprint, doc_path)
+    local fingerprints, flush = self:fingerprints_for(doc_path)
+    if fingerprints and not fingerprints[fingerprint] then
+        fingerprints[fingerprint] = true
+        flush()
+    end
+end
+
+function AnkiConnect:fingerprint_known(fingerprint, doc_path)
+    local fingerprints = self:fingerprints_for(doc_path)
+    return fingerprints ~= nil and fingerprints[fingerprint] ~= nil
 end
 
 --[[
 -- The note stayed the same note but not the same identity: it is the passage which
--- identifies it, and that is exactly what an edit changes.
+-- identifies it, and that is exactly what an edit changes. The book it belongs to is
+-- not always the one being read - the queue is shared by every book.
 --]]
-function AnkiConnect:move_fingerprint(old_fingerprint, fingerprint)
-    self.known_fingerprints[old_fingerprint] = nil
-    self.known_fingerprints[fingerprint] = true
+function AnkiConnect:move_fingerprint(old_fingerprint, fingerprint, doc_path)
+    self:forget_fingerprint(old_fingerprint, doc_path)
+    self:remember_fingerprint(fingerprint, doc_path)
     local latest = self.latest_note
     if latest and latest.fingerprint == old_fingerprint then
         latest.fingerprint = fingerprint
     end
 end
 
+--[[
+-- A queued note's identity, which is carried with the note rather than worked out afresh.
+--
+-- Which fields take part in a fingerprint depends on the profile the note was made under
+-- (the definition and the metadata are left out by name), and the queue is looked at from
+-- places where a different profile - or none at all - is loaded. Working it out again
+-- there gives a different answer for the very same note, and a note whose identity moved
+-- can no longer be found in its book, so removing it would not release the word and
+-- adding it again would be refused as a duplicate.
+--
+-- It is stamped on when the note is queued, where the profile is certainly the right one.
+-- A note without one is worked out as before, and nothing is written back: without a
+-- profile loaded the answer would be wrong, and wrong is worse when it is kept.
+--]]
+local MD5_PATTERN = ("^%s$"):format(("%x"):rep(32))
+
+function AnkiConnect:queued_fingerprint(note)
+    if type(note.fingerprint) == "string" and note.fingerprint:find(MD5_PATTERN) then
+        return note.fingerprint
+    end
+    return self:note_fingerprint(note)
+end
+
 -- the queued note a fingerprint belongs to, when it is one that hasn't been synced yet
 function AnkiConnect:queued_note(fingerprint)
     for i, note in ipairs(self.local_notes) do
-        if self:note_fingerprint(note) == fingerprint then
+        if self:queued_fingerprint(note) == fingerprint then
             return note, i
         end
     end
@@ -409,11 +447,8 @@ function AnkiConnect:delete_latest_note()
         self.latest_note = nil
         return self:show_popup("That note is no longer in the queue.", 3, true)
     end
-    table.remove(self.local_notes, queue_idx)
-    self:forget_fingerprint(latest.fingerprint, latest.doc_path)
-    self:write_notes()
+    self:remove_queued_note(queue_idx) -- which is what clears latest_note
     self:show_popup(("Removed note (word: %s)"):format(latest.word), 3, true)
-    self.latest_note = nil
 end
 
 --[[
@@ -435,6 +470,7 @@ function AnkiConnect:add_note(anki_note)
     end
 
     self.known_fingerprints[fingerprint] = true
+    note.fingerprint = fingerprint -- worked out under this note's profile, see queued_fingerprint
     table.insert(self.local_notes, note)
     u.open_file(self.notes_filename, 'a', function(f) f:write(json.encode(note) .. '\n') end)
     self.latest_note = {
@@ -479,11 +515,61 @@ function AnkiConnect:update_note_context(old_fingerprint, anki_note)
         return false, "duplicate_note"
     end
 
+    note.fingerprint = fingerprint
     self.local_notes[queue_idx] = note
-    self:move_fingerprint(old_fingerprint, fingerprint)
+    self:move_fingerprint(old_fingerprint, fingerprint, note.doc_path)
     self:write_notes()
     self:show_popup("Updated the note's context.", 3, true)
     return true, "queued"
+end
+
+--[[
+-- Rewrites fields of a queued note by hand, which is what the notes viewer does. The
+-- note's identity is made out of its fields, so it moves with them; a change that would
+-- turn the note into one its book already has is refused and rolled back, the same way
+-- adding that note would have been.
+--]]
+function AnkiConnect:edit_queued_note(index, fields)
+    local note = self.local_notes[index]
+    if not note then
+        return false, "unknown_note"
+    end
+    local old_fingerprint = self:queued_fingerprint(note)
+    local previous = {}
+    for name, value in pairs(fields) do
+        previous[name] = note.data.fields[name]
+        note.data.fields[name] = value
+    end
+    local fingerprint = self:note_fingerprint(note)
+    if fingerprint == old_fingerprint then
+        return true, "unchanged"
+    end
+    if self:fingerprint_known(fingerprint, note.doc_path) then
+        for name, value in pairs(previous) do
+            note.data.fields[name] = value
+        end
+        return false, "duplicate_note"
+    end
+    note.fingerprint = fingerprint
+    self:move_fingerprint(old_fingerprint, fingerprint, note.doc_path)
+    self:write_notes()
+    return true, "edited"
+end
+
+-- drops a queued note, and with it the claim its book had on that passage
+function AnkiConnect:remove_queued_note(index)
+    local note = self.local_notes[index]
+    if not note then
+        return false
+    end
+    local fingerprint = self:queued_fingerprint(note)
+    table.remove(self.local_notes, index)
+    self:forget_fingerprint(fingerprint, note.doc_path)
+    if self.latest_note and self.latest_note.fingerprint == fingerprint then
+        self.latest_note = nil
+    end
+    self:write_notes()
+    return true
 end
 
 --[[
