@@ -2,7 +2,6 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local CustomContextMenu = require("customcontextmenu")
 local DataStorage = require("datastorage")
-local DictQuickLookup = require("ui/widget/dictquicklookup")
 local InfoMessage = require("ui/widget/infomessage")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local LuaSettings = require("luasettings")
@@ -317,6 +316,7 @@ function AnkiWidget:init()
 
     self.ui.menu:registerToMainMenu(self)
     self:handle_events()
+    self:register_dict_buttons()
 end
 
 function AnkiWidget:extend_doc_settings(filepath, document_properties)
@@ -376,11 +376,20 @@ function AnkiWidget:set_profile(callback)
     }
 end
 
-function AnkiWidget:mark_add_to_anki_button()
-    self.add_to_anki_marked = true
+-- The dictionary popup stays open after a note was added, so relabel its button to
+-- confirm the card was created.
+function AnkiWidget:mark_add_to_anki_button(popup_dict)
+    local button = popup_dict.button_table and popup_dict.button_table:getButtonById("add_to_anki")
+    if not button then
+        return
+    end
+    button:setText(_("Added to Anki"), button.width)
+    UIManager:setDirty(popup_dict, function()
+        return "ui", button.dimen
+    end)
 end
 
-function AnkiWidget:add_note_with_feedback(note_builder)
+function AnkiWidget:add_note_with_feedback(note_builder, on_added)
     self:set_profile(function()
         self:check_conn(function()
             local note = note_builder()
@@ -388,11 +397,52 @@ function AnkiWidget:add_note_with_feedback(note_builder)
                 return
             end
             local ok = AnkiConnect:add_note(note)
-            if ok then
-                self:mark_add_to_anki_button()
+            if ok and on_added then
+                on_added()
             end
         end)
     end)
+end
+
+-- Registers the "Add to Anki" button with the dictionary popup. The popup owns the
+-- layout: the button lands in the user configurable set, and can be moved or hidden
+-- through the dictionary's "Customize buttons" menu.
+function AnkiWidget:register_dict_buttons()
+    if not self.ui or not self.ui.dictionary then
+        return
+    end
+    self.ui.dictionary:addToDictButtons {
+        id = "add_to_anki",
+        menu_text = _("Add to Anki"),
+        text = _("Add to Anki"),
+        font_bold = true,
+        insert_first = true,
+        show_func = function()
+            -- notes are built from the surrounding text, which only exists while reading
+            if not self.ui.document then
+                return false
+            end
+            -- lookups made from within the vocabulary builder have no reading context
+            if self.ui.vocabbuilder and UIManager:isWidgetShown(self.ui.vocabbuilder.widget) then
+                return false
+            end
+            return true
+        end,
+        callback = function(popup_dict)
+            self:add_note_with_feedback(function()
+                self.current_note = AnkiNote:new(popup_dict)
+                return self.current_note
+            end, function()
+                self:mark_add_to_anki_button(popup_dict)
+            end)
+        end,
+        hold_callback = function(popup_dict)
+            self:set_profile(function()
+                self.current_note = AnkiNote:new(popup_dict)
+                self:show_config_widget()
+            end)
+        end,
+    }
 end
 
 function AnkiWidget:handle_events()
@@ -407,32 +457,6 @@ function AnkiWidget:handle_events()
     end
 
     self.onReaderReady = function(obj, doc_settings)
-        -- Insert new button in the popup dictionary to allow adding anki cards
-        -- TODO disable button if lookup was not contextual
-        DictQuickLookup.tweak_buttons_func = function(popup_dict, buttons)
-            self.add_to_anki_marked = false
-            self.add_to_anki_btn = {
-                id = "add_to_anki",
-                text = _("Add to Anki"),
-                font_bold = true,
-                checked_func = function()
-                    return self.add_to_anki_marked or false
-                end,
-                callback = function()
-                    self:add_note_with_feedback(function()
-                        self.current_note = AnkiNote:new(popup_dict)
-                        return self.current_note
-                    end)
-                end,
-                hold_callback = function()
-                    self:set_profile(function()
-                        self.current_note = AnkiNote:new(popup_dict)
-                        self:show_config_widget()
-                    end)
-                end,
-            }
-            table.insert(buttons, 1, { self.add_to_anki_btn })
-        end
         if self.ui.highlight and self.ui.highlight.addToHighlightDialog then
             self.ui.highlight:addToHighlightDialog("20_add_to_anki", function(highlight)
                 return {
@@ -462,39 +486,6 @@ function AnkiWidget:handle_events()
         local filepath = updated_props.filepath
         self:extend_doc_settings(filepath, self.ui.bookinfo:getDocProps(filepath, updated_props.doc_props))
     end
-end
-
-function AnkiWidget:onDictButtonsReady(popup_dict, buttons)
-    if self.ui and not self.ui.document then
-        return
-    end
-    if self.ui.vocabbuilder and UIManager:isWidgetShown(self.ui.vocabbuilder.widget) then
-        return
-    end
-    self.add_to_anki_marked = false
-    self.add_to_anki_btn = {
-        id = "add_to_anki",
-        text = _("Add to Anki"),
-        font_bold = true,
-        checked_func = function()
-            return self.add_to_anki_marked or false
-        end,
-        callback = function()
-            self:add_note_with_feedback(function()
-                self.current_note = AnkiNote:new(popup_dict)
-                return self.current_note
-            end)
-        end,
-        hold_callback = function()
-            self:set_profile(function()
-                self:check_conn(function()
-                    self.current_note = AnkiNote:new(popup_dict)
-                    self:show_config_widget()
-                end)
-            end)
-        end,
-    }
-    table.insert(buttons, 1, { self.add_to_anki_btn })
 end
 
 return AnkiWidget
