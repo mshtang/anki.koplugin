@@ -18,6 +18,7 @@ local lfs = require("libs/libkoreader-lfs")
 local AnkiConnect = require("ankiconnect")
 local AnkiNote = require("ankinote")
 local Configuration = require("anki_configuration")
+local NotesViewer = require("notesviewer")
 
 local AnkiWidget = WidgetContainer:extend {
     name = "anki_widget",
@@ -297,12 +298,34 @@ function AnkiWidget:buildSettings()
         { text = ("Edit profiles"), sub_item_table = profiles },
         { text = ("anki-connect settings"), keep_menu_open = true, callback = function() self:show_connection_widget() end },
         {
-            -- the one way anything reaches Anki, so it says how much is waiting
-            text_func = function() return ("Sync (%d) note(s) to Anki"):format(#AnkiConnect.local_notes) end,
+            -- where the queue is looked over before it goes anywhere, so it says how
+            -- much is in it: this is the one route to Anki, and the count is the nudge
+            text_func = function() return ("View notes (%d)"):format(#AnkiConnect.local_notes) end,
             enabled_func = function() return #AnkiConnect.local_notes > 0 end,
-            callback = function() self:check_conn(function() AnkiConnect:sync_notes() end) end
+            keep_menu_open = true,
+            callback = function() self:show_notes_viewer() end
         },
     }
+end
+
+--[[
+-- Opens the queue for inspection, under a profile. Which fields make up a note's identity
+-- is the profile's business, and the view is where notes are removed and edited - so
+-- without one loaded, a note queued before it carried its own identity would be worked
+-- out differently here than it was when it was made, and removing it would release the
+-- wrong fingerprint (or none), leaving the word refused as a duplicate ever after.
+-- Every other way into the plugin loads a profile for its own reasons; from the file
+-- browser there is no document to take one from, and notes made since carry their own.
+--]]
+function AnkiWidget:show_notes_viewer()
+    local function open()
+        NotesViewer:show(function() self:check_conn(function() AnkiConnect:sync_notes() end) end)
+    end
+    if self.ui and self.ui.document then
+        self:set_profile(open)
+    else
+        open()
+    end
 end
 
 function AnkiWidget:check_conn(callback)
