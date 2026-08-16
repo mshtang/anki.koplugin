@@ -302,15 +302,9 @@ function AnkiConnect:sync_offline_notes()
         table.insert(sync_ok and synced or failed, note)
     end
     self.local_notes = failed
-    local failed_as_json = {}
-    for _,note in ipairs(failed) do
-        table.insert(failed_as_json, json.encode(note))
-    end
-    -- called even when there's no failed notes, this way it also gets rid of the notes which we managed to sync, no need to keep those around
-    u.open_file(self.notes_filename, 'w', function(f)
-        f:write(table.concat(failed_as_json, '\n'))
-        if #failed_as_json > 0 then f:write('\n') end
-    end)
+    -- written even when nothing failed, this way it also gets rid of the notes which we
+    -- managed to sync, no need to keep those around
+    self:write_notes()
     local sync_message_parts = {}
     if #synced > 0 then
         -- if any notes were synced succesfully, reset the latest added note (since it's not actually latest anymore)
@@ -337,6 +331,9 @@ function AnkiConnect:sync_offline_notes()
                     self:forget_fingerprint(self:note_fingerprint(note), note.doc_path)
                 end
                 self.local_notes = {}
+                if self.latest_synced_note and self.latest_synced_note.state == "offline" then
+                    self.latest_synced_note = nil -- it was in the queue we just dropped
+                end
             end
         })
     end
@@ -376,23 +373,22 @@ function AnkiConnect:delete_latest_note()
             self:forget_fingerprint(latest.fingerprint, latest.doc_path)
         end
     else
-        table.remove(self.local_notes, #self.local_notes)
-        if latest.fingerprint then
-            self:forget_fingerprint(latest.fingerprint, latest.doc_path)
+        -- looked up by identity rather than taken off the end: the queue is only ever
+        -- appended to today, but "drop the last one" would quietly throw away somebody
+        -- else's note the moment that stops being true
+        local removed
+        for i = #self.local_notes, 1, -1 do
+            if self:note_fingerprint(self.local_notes[i]) == latest.fingerprint then
+                removed = table.remove(self.local_notes, i)
+                break
+            end
         end
-        local entries_on_disk = {}
-        u.open_file(self.notes_filename, 'r', function(f)
-            for line in f:lines() do
-                table.insert(entries_on_disk, line)
-            end
-        end)
-        table.remove(entries_on_disk)
-        u.open_file(self.notes_filename, 'w', function(f)
-            f:write(table.concat(entries_on_disk, '\n'))
-            if #entries_on_disk > 0 then
-                f:write('\n')
-            end
-        end)
+        if not removed then
+            self.latest_synced_note = nil
+            return self:show_popup("That note is no longer in the queue.", 3, true)
+        end
+        self:forget_fingerprint(latest.fingerprint, latest.doc_path)
+        self:write_notes()
         self:show_popup(("Removed note (word: %s)"):format(latest.id), 3, true)
     end
     self.latest_synced_note = nil
@@ -477,14 +473,17 @@ function AnkiConnect:load_notes()
             end
         end
     end)
-    -- rewrite file to drop duplicates (if any were skipped)
+    self:write_notes() -- drops the duplicates that were skipped, if there were any
+    logger.dbg(("Loaded %d notes from disk."):format(#self.local_notes))
+end
+
+-- the queue on disk is the queue in memory: always write the whole thing back
+function AnkiConnect:write_notes()
     u.open_file(self.notes_filename, 'w', function(f)
         for _, note in ipairs(self.local_notes) do
-            f:write(json.encode(note))
-            f:write('\n')
+            f:write(json.encode(note), '\n')
         end
     end)
-    logger.dbg(("Loaded %d notes from disk."):format(#self.local_notes))
 end
 
 function AnkiConnect:onNetworkConnected()
