@@ -376,14 +376,20 @@ function AnkiWidget:set_profile(callback)
     }
 end
 
--- The dictionary popup stays open after a note was added, so relabel its button to
--- confirm the card was created.
+--[[
+-- The dictionary popup stays open after a note was added, so relabel its button and grey
+-- it out to confirm the card was created and that tapping again would do nothing. Holding
+-- keeps working: the config widget is how the note that was just added is edited or taken
+-- back, which is exactly what one wants right after adding it.
+--]]
 function AnkiWidget:mark_add_to_anki_button(popup_dict)
     local button = popup_dict.button_table and popup_dict.button_table:getButtonById("add_to_anki")
     if not button then
         return
     end
+    button.allow_hold_when_disabled = true
     button:setText(_("Added to Anki"), button.width)
+    button:disable()
     UIManager:setDirty(popup_dict, function()
         return "ui", button.dimen
     end)
