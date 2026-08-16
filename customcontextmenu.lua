@@ -31,6 +31,8 @@ local function make_button(text, width, cb, enabled_func)
 end
 
 function CustomContextMenu:init()
+    -- where picking by hand starts from, and what "changed" is measured against
+    self.initial_context = self.note:get_auto_context_counts()
     self:reset() -- first call is just for initializing
     -- best effort: falls back to no lang attribute when it can't be determined
     -- (e.g. neither the dictionary nor the document have it set)
@@ -124,7 +126,8 @@ function CustomContextMenu:init()
     self.confirm_row = HorizontalGroup:new{
         align = "center",
         make_button("Cancel", btn_width*2, function() self:onClose() end),
-        make_button("Save with custom context", btn_width*4, self.on_save_cb),
+        make_button("Save with custom context", btn_width*4, self.on_save_cb,
+                    function() return self:context_changed() end),
     }
 
     self.context_menu = FrameContainer:new{
@@ -187,18 +190,27 @@ function CustomContextMenu:reset()
     self:reset_next()
 end
 
--- picking the context by hand starts from the sentence the word occured in; the
--- automatic extension does not apply here, what you pick is what you get
-local DEFAULT_SENTENCE_COUNT = 1
-
+--[[
+-- Picking the context by hand starts from the passage the plugin picked by itself, which
+-- is also what "Reset" goes back to: the menu is opened to correct that passage, so this
+-- is the one starting point from which every button press is a deliberate change. From
+-- here on what you pick is what you get - the automatic extension does not apply.
+--]]
 function CustomContextMenu:reset_prev()
-    self.prev_s_cnt = DEFAULT_SENTENCE_COUNT
-    self.prev_c_cnt = 0
+    self.prev_s_cnt = self.initial_context.prev_s
+    self.prev_c_cnt = self.initial_context.prev_c
 end
 
 function CustomContextMenu:reset_next()
-    self.next_s_cnt = DEFAULT_SENTENCE_COUNT
-    self.next_c_cnt = 0
+    self.next_s_cnt = self.initial_context.next_s
+    self.next_c_cnt = self.initial_context.next_c
+end
+
+-- nothing to save while the passage on screen is the one the note would get anyway
+function CustomContextMenu:context_changed()
+    local initial = self.initial_context
+    return self.prev_s_cnt ~= initial.prev_s or self.prev_c_cnt ~= initial.prev_c
+        or self.next_s_cnt ~= initial.next_s or self.next_c_cnt ~= initial.next_c
 end
 
 function CustomContextMenu:update_context()
