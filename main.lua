@@ -450,6 +450,8 @@ function AnkiWidget:handle_events()
     self.onCloseWidget = function()
         self.known_document_profiles:close()
         Configuration:save()
+        -- the reader has flushed the book's settings by now, let go of them
+        AnkiConnect:unload_fingerprints()
     end
 
     self.onSuspend = function()
@@ -477,6 +479,7 @@ function AnkiWidget:handle_events()
             end)
         end
         local filepath = doc_settings.data.doc_path
+        AnkiConnect:load_fingerprints(doc_settings, filepath)
         self:extend_doc_settings(filepath, self.ui.bookinfo:getDocProps(filepath, doc_settings.doc_props))
     end
 

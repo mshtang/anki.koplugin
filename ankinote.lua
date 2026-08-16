@@ -226,7 +226,10 @@ function AnkiNote:build()
             },
         },
         -- used as id to detect duplicates when storing notes offline
-        identifier = conf.word_field:get_value()
+        identifier = conf.word_field:get_value(),
+        -- the book this came from: a queued note outlives the session that made it, and
+        -- dropping it again means taking its fingerprint back out of that book's sidecar
+        doc_path = self.ui.document.file,
     }
 end
 
@@ -260,6 +263,7 @@ function AnkiNote:build_highlight_note()
         data = note,
         field_callbacks = {},
         identifier = conf.word_field:get_value(),
+        doc_path = self.ui.document.file,
     }
 end
 

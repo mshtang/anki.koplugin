@@ -113,6 +113,13 @@ function utils.is_numeric(str)
     return string.match(str, "^-?[%d%.]+$")
 end
 
+-- number of entries in a table, including the ones ipairs would not reach
+function utils.count(t)
+    local n = 0
+    for _ in pairs(t or {}) do n = n + 1 end
+    return n
+end
+
 function utils.to_set(list)
     local set = {}
     for _,v in pairs(list) do

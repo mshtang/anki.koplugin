@@ -11,29 +11,48 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
 local NetworkMgr = require("ui/network/manager")
 local DataStorage = require("datastorage")
+local DocSettings = require("docsettings")
 local Translator = require("ui/translator")
 local forvo = require("forvo")
 local u = require("lua_utils/utils")
 local conf = require("anki_configuration")
+local md5 = require("ffi/sha2").md5
+
+-- key the fingerprints are kept under in the book's sidecar (.sdr) settings
+local FINGERPRINTS_KEY = "anki_note_fingerprints"
 
 local AnkiConnect = require("ui/widget/widget"):extend{
     -- NetworkMgr func is device dependent, assume it's true when not implemented.
     wifi_connected = NetworkMgr.isWifiOn and NetworkMgr:isWifiOn() or true,
     -- contains notes which we could not sync yet
     local_notes = {},
-    -- fingerprints of notes stored offline (all fields match)
-    local_note_fingerprints = {},
-    -- fingerprints of every note we've created this session (offline or synced)
+    --[[
+    -- Fingerprints of the notes made from the book being read, whether they reached
+    -- Anki or are still queued. A note whose fingerprint is in here is refused as a
+    -- duplicate. This is the very table held in the book's sidecar settings, so adding
+    -- to it is all it takes to have it saved with the rest of the book's metadata.
+    -- Empty while no book is open, which is also when no note can be made.
+    --]]
     known_fingerprints = {},
     -- path of notes stored locally when WiFi isn't available
-    notes_filename = DataStorage:getSettingsDir() .. "/anki.koplugin_notes.json"
+    notes_filename = DataStorage:getSettingsDir() .. "/anki.koplugin_notes.json",
 }
 
--- Build a deterministic fingerprint for a note based on all of its fields.
--- Notes are considered identical only when this fingerprint matches.
-local function fingerprint_fields(fields)
+--[[
+-- What makes two notes the same: the looked up word and the passage it sits in.
+--
+-- Not every field takes part. The definition is whatever dictionary tab happened to be
+-- open, and the metadata carries the page the reader was on, so with either of them in,
+-- the same word in the same passage would count as a new note each time. They are
+-- dropped by name rather than the identity being picked by name on purpose: a note
+-- built under a different profile then keeps its own fields and stays distinguishable,
+-- instead of collapsing into one empty identity shared with every other foreign note.
+--]]
+local function fingerprint_fields(fields, ignored)
     local keys, parts = {}, {}
-    for k in pairs(fields or {}) do table.insert(keys, k) end
+    for k in pairs(fields or {}) do
+        if not ignored[k] then table.insert(keys, k) end
+    end
     table.sort(keys)
     for _, k in ipairs(keys) do
         parts[#parts+1] = ("%s=%s"):format(k, tostring(fields[k] or ""))
@@ -69,11 +88,64 @@ function AnkiConnect.with_timeout(timeout, func)
     return unpack(res)
 end
 
-function AnkiConnect:note_fingerprint(note, recompute)
-    if recompute or not note.fingerprint then
-        note.fingerprint = fingerprint_fields(note.data and note.data.fields or {})
+--[[
+-- A note's identity, as it was built from the document. It is deliberately taken
+-- before handle_callbacks runs: audio, picture and translated context are derived
+-- from the note, so letting them into the fingerprint would give one and the same
+-- note a different identity offline (callbacks still pending) than online.
+--]]
+function AnkiConnect:note_fingerprint(note)
+    local ignored = {}
+    for _, setting in ipairs({ conf.def_field, conf.meta_field }) do
+        local field_name = setting:get_value()
+        if field_name then ignored[field_name] = true end
     end
-    return note.fingerprint
+    -- hashed: these are kept for as long as the book is, and the readable form is as
+    -- long as the passage the note was made from
+    return md5(fingerprint_fields(note.data and note.data.fields or {}, ignored))
+end
+
+--[[
+-- Notes are remembered per book, in its sidecar settings, which is what the reader
+-- already carries around: the fingerprints follow the book when it is renamed or moved,
+-- and go away with it when it is deleted, so nothing has to be capped or swept up.
+--
+-- They are written by reference. The reader flushes the sidecar when the book is closed,
+-- when KOReader is restarted or suspended, and on its own timer (15 minutes by default),
+-- so there is nothing to write out here.
+--]]
+function AnkiConnect:load_fingerprints(doc_settings, doc_path)
+    self.known_fingerprints = doc_settings:readSetting(FINGERPRINTS_KEY, {})
+    self.fingerprints_doc_path = doc_path
+    logger.dbg(("Loaded %d note fingerprint(s) for %s."):format(u.count(self.known_fingerprints), doc_path))
+end
+
+-- called when the book is closed, so a later edit cannot write into an orphaned table
+function AnkiConnect:unload_fingerprints()
+    self.known_fingerprints = {}
+    self.fingerprints_doc_path = nil
+end
+
+--[[
+-- Undo of the above, for a note that was thrown away again. The queue is shared by every
+-- book, so the note being dropped is not necessarily one of the book being read: when it
+-- is not, its book is opened just far enough to take the fingerprint back out. Its sidecar
+-- is written right away, since nothing else is going to flush it for us.
+--]]
+function AnkiConnect:forget_fingerprint(fingerprint, doc_path)
+    if not doc_path then
+        return -- queued by a version that did not record where the note came from
+    end
+    if doc_path == self.fingerprints_doc_path then
+        self.known_fingerprints[fingerprint] = nil
+        return
+    end
+    local doc_settings = DocSettings:open(doc_path)
+    local fingerprints = doc_settings:readSetting(FINGERPRINTS_KEY)
+    if fingerprints and fingerprints[fingerprint] then
+        fingerprints[fingerprint] = nil
+        doc_settings:flush()
+    end
 end
 
 function AnkiConnect:is_running(url)
@@ -212,30 +284,24 @@ function AnkiConnect:sync_offline_notes()
         return self:show_popup(string.format("Synchronizing failed!\n%s", err), 3, true)
     end
 
+    -- a queued note is already in known_fingerprints (put there when it was stored, or
+    -- a queued note was written into its book's sidecar when it was made, and syncing
+    -- does not change its identity, so there is no fingerprint bookkeeping to do here
     local synced, failed, errs = {}, {}, u.defaultdict(0)
     for _,note in ipairs(self.local_notes) do
         local sync_ok = self:handle_callbacks(note, function(callback_err)
             errs[callback_err] = errs[callback_err] + 1
         end)
-        local fingerprint = self:note_fingerprint(note, true)
         if sync_ok then
             local _, request_err = self:request_add_note(note.data)
             if request_err then
                 sync_ok = false
                 errs[request_err] = errs[request_err] + 1
-            else
-                self.known_fingerprints[fingerprint] = true
-                self.local_note_fingerprints[fingerprint] = nil
             end
         end
         table.insert(sync_ok and synced or failed, note)
     end
     self.local_notes = failed
-    self.local_note_fingerprints = {}
-    for _, note in ipairs(self.local_notes) do
-        local fp = self:note_fingerprint(note)
-        self.local_note_fingerprints[fp] = true
-    end
     local failed_as_json = {}
     for _,note in ipairs(failed) do
         table.insert(failed_as_json, json.encode(note))
@@ -265,8 +331,12 @@ function AnkiConnect:sync_offline_notes()
             cancel_text = "Keep",
             ok_callback = function()
                 os.remove(self.notes_filename)
+                -- the user threw these away on purpose: take them back out of the books
+                -- they were made from, otherwise an identical note stays refused forever
+                for _, note in ipairs(failed) do
+                    self:forget_fingerprint(self:note_fingerprint(note), note.doc_path)
+                end
                 self.local_notes = {}
-                self.local_note_fingerprints = {}
             end
         })
     end
@@ -303,13 +373,12 @@ function AnkiConnect:delete_latest_note()
         end
         self:show_popup(("Removed note (id: %s)"):format(latest.id), 3, true)
         if latest.fingerprint then
-            self.known_fingerprints[latest.fingerprint] = nil
+            self:forget_fingerprint(latest.fingerprint, latest.doc_path)
         end
     else
         table.remove(self.local_notes, #self.local_notes)
         if latest.fingerprint then
-            self.local_note_fingerprints[latest.fingerprint] = nil
-            self.known_fingerprints[latest.fingerprint] = nil
+            self:forget_fingerprint(latest.fingerprint, latest.doc_path)
         end
         local entries_on_disk = {}
         u.open_file(self.notes_filename, 'r', function(f)
@@ -336,9 +405,17 @@ function AnkiConnect:add_note(anki_note)
         return false, "build_failed"
     end
 
+    -- taken before the callbacks below, which cost a request each: no point fetching
+    -- audio or a translation for a note we are about to refuse
+    local fingerprint = self:note_fingerprint(note)
+    if self.known_fingerprints[fingerprint] then
+        self:show_popup("Identical note already exists; skipping duplicate.", 6, true)
+        return false, "duplicate_note"
+    end
+
     local can_sync, err = self:is_running(conf.url:get_value())
     if not can_sync then
-        return self:store_offline(note, err)
+        return self:store_offline(note, fingerprint, err)
     end
 
     if #self.local_notes > 0 then
@@ -356,52 +433,45 @@ function AnkiConnect:add_note(anki_note)
     end)
     if not callback_ok then return false, "callback_failed" end
 
-    local fingerprint = self:note_fingerprint(note, true)
-    if self.local_note_fingerprints[fingerprint] or self.known_fingerprints[fingerprint] then
-        self:show_popup("Identical note already exists; skipping duplicate.", 6, true)
-        return false, "duplicate_note"
-    end
-
     local result, request_err = self:request_add_note(note.data)
     if request_err then
         self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
         return false, "sync_failed"
     end
     self.known_fingerprints[fingerprint] = true
-    self.latest_synced_note = { state = "online", id = result, fingerprint = fingerprint }
+    self.latest_synced_note = { state = "online", id = result, fingerprint = fingerprint, doc_path = note.doc_path }
     self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
     logger.info("note added succesfully: " .. result)
     return true, "online"
 end
 
-function AnkiConnect:store_offline(note, reason, show_always)
+-- the caller has already fingerprinted the note and checked it for duplicates
+function AnkiConnect:store_offline(note, fingerprint, reason)
     local id = note.data.fields[note.identifier]
-    local fingerprint = self:note_fingerprint(note, true)
-    if self.local_note_fingerprints[fingerprint] or self.known_fingerprints[fingerprint] then
-        self:show_popup("Identical note already stored offline!", 6, true)
-        return false, "duplicate_offline"
-    end
-    self.local_note_fingerprints[fingerprint] = true
     self.known_fingerprints[fingerprint] = true
     table.insert(self.local_notes, note)
     u.open_file(self.notes_filename, 'a', function(f) f:write(json.encode(note) .. '\n') end)
-    self.latest_synced_note = { state = "offline", id = id, fingerprint = fingerprint }
-    self:show_popup(string.format("%s\nStored note offline", reason), 3, show_always or false)
+    self.latest_synced_note = { state = "offline", id = id, fingerprint = fingerprint, doc_path = note.doc_path }
+    self:show_popup(string.format("%s\nStored note offline", reason), 3, false)
     return true, "offline"
 end
 
+--[[
+-- The queue is shared by every book, and its notes are already known to the books they
+-- were made from, so nothing here goes into known_fingerprints: that belongs to the book
+-- being read, and seeding it from the queue would blindly cover other books' notes too.
+--]]
 function AnkiConnect:load_notes()
     self.local_notes = {}
-    self.local_note_fingerprints = {}
+    local seen = {} -- scoped to this read: it only guards against a doubled line
     u.open_file(self.notes_filename, 'r', function(f)
         for note_json in f:lines() do
             local note, err = json.decode(note_json)
             assert(note, ("Could not parse note '%s': %s"):format(note_json, err))
-            local fingerprint = self:note_fingerprint(note, true)
-            if not self.local_note_fingerprints[fingerprint] then
+            local fingerprint = self:note_fingerprint(note)
+            if not seen[fingerprint] then
                 table.insert(self.local_notes, note)
-                self.local_note_fingerprints[fingerprint] = true
-                self.known_fingerprints[fingerprint] = true
+                seen[fingerprint] = true
             else
                 logger.info("Skipped duplicate offline note (all fields match).")
             end
@@ -409,7 +479,7 @@ function AnkiConnect:load_notes()
     end)
     -- rewrite file to drop duplicates (if any were skipped)
     u.open_file(self.notes_filename, 'w', function(f)
-        for idx, note in ipairs(self.local_notes) do
+        for _, note in ipairs(self.local_notes) do
             f:write(json.encode(note))
             f:write('\n')
         end
