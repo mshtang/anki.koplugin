@@ -21,10 +21,21 @@ local md5 = require("ffi/sha2").md5
 -- key the fingerprints are kept under in the book's sidecar (.sdr) settings
 local FINGERPRINTS_KEY = "anki_note_fingerprints"
 
+--[[
+-- Making a note never touches the network. Adding one writes it to a local queue,
+-- editing or dropping one rewrites that queue, and the whole queue is handed to Anki
+-- only when the user asks for it from the menu. Reading is what an e-reader is good at
+-- and reaching Anki over a sleeping WiFi is what it is bad at, so nothing here waits on
+-- a connection, nothing fails for the want of one, and there is a single moment - the
+-- sync - at which the plugin talks to Anki at all.
+--
+-- The consequence, which the UI is careful to show, is that a note can be edited up
+-- until it is synced. After that it is Anki's, and Anki is where it gets edited.
+--]]
 local AnkiConnect = require("ui/widget/widget"):extend{
     -- NetworkMgr func is device dependent, assume it's true when not implemented.
     wifi_connected = NetworkMgr.isWifiOn and NetworkMgr:isWifiOn() or true,
-    -- contains notes which we could not sync yet
+    -- notes waiting to be handed to Anki, in the order they were made
     local_notes = {},
     --[[
     -- Fingerprints of the notes made from the book being read, whether they reached
@@ -32,9 +43,13 @@ local AnkiConnect = require("ui/widget/widget"):extend{
     -- duplicate. This is the very table held in the book's sidecar settings, so adding
     -- to it is all it takes to have it saved with the rest of the book's metadata.
     -- Empty while no book is open, which is also when no note can be made.
+    --
+    -- They outlive the sync that empties the queue: a book keeps every word it gave,
+    -- which is the whole point of them - otherwise the same word would be offered again
+    -- as new after every sync, and Anki would end up with the card twice.
     --]]
     known_fingerprints = {},
-    -- path of notes stored locally when WiFi isn't available
+    -- the queue on disk
     notes_filename = DataStorage:getSettingsDir() .. "/anki.koplugin_notes.json",
 }
 
@@ -110,6 +125,10 @@ end
 -- already carries around: the fingerprints follow the book when it is renamed or moved,
 -- and go away with it when it is deleted, so nothing has to be capped or swept up.
 --
+-- A fingerprint maps to the id of the Anki note it made, which is what lets its passage
+-- be rewritten later. `true` stands for a note whose id we don't have: one still waiting
+-- in the offline queue, or one made before the ids were kept.
+--
 -- They are written by reference. The reader flushes the sidecar when the book is closed,
 -- when KOReader is restarted or suspended, and on its own timer (15 minutes by default),
 -- so there is nothing to write out here.
@@ -145,6 +164,28 @@ function AnkiConnect:forget_fingerprint(fingerprint, doc_path)
     if fingerprints and fingerprints[fingerprint] then
         fingerprints[fingerprint] = nil
         doc_settings:flush()
+    end
+end
+
+--[[
+-- The note stayed the same note but not the same identity: it is the passage which
+-- identifies it, and that is exactly what an edit changes.
+--]]
+function AnkiConnect:move_fingerprint(old_fingerprint, fingerprint)
+    self.known_fingerprints[old_fingerprint] = nil
+    self.known_fingerprints[fingerprint] = true
+    local latest = self.latest_note
+    if latest and latest.fingerprint == old_fingerprint then
+        latest.fingerprint = fingerprint
+    end
+end
+
+-- the queued note a fingerprint belongs to, when it is one that hasn't been synced yet
+function AnkiConnect:queued_note(fingerprint)
+    for i, note in ipairs(self.local_notes) do
+        if self:note_fingerprint(note) == fingerprint then
+            return note, i
+        end
     end
 end
 
@@ -274,8 +315,13 @@ function AnkiConnect:handle_callbacks(note, on_err_func)
     return true
 end
 
-function AnkiConnect:sync_offline_notes()
-    if NetworkMgr:willRerunWhenOnline(function() self:sync_offline_notes() end) then
+--[[
+-- The one moment the plugin talks to Anki. Everything the notes still owe - the Forvo
+-- audio, the translated context - is fetched here rather than when the note was made,
+-- so a single wake of the WiFi pays for the whole queue.
+--]]
+function AnkiConnect:sync_notes()
+    if NetworkMgr:willRerunWhenOnline(function() self:sync_notes() end) then
         return
     end
 
@@ -284,7 +330,6 @@ function AnkiConnect:sync_offline_notes()
         return self:show_popup(string.format("Synchronizing failed!\n%s", err), 3, true)
     end
 
-    -- a queued note is already in known_fingerprints (put there when it was stored, or
     -- a queued note was written into its book's sidecar when it was made, and syncing
     -- does not change its identity, so there is no fingerprint bookkeeping to do here
     local synced, failed, errs = {}, {}, u.defaultdict(0)
@@ -307,9 +352,8 @@ function AnkiConnect:sync_offline_notes()
     self:write_notes()
     local sync_message_parts = {}
     if #synced > 0 then
-        -- if any notes were synced succesfully, reset the latest added note (since it's not actually latest anymore)
-        -- no point in saving the actual latest synced note, since the user won't know which note that was anyway
-        self.latest_synced_note = nil
+        -- the notes which went are Anki's now: there is nothing left here to undo or edit
+        self.latest_note = nil
         table.insert(sync_message_parts, ("Finished synchronizing %d note(s)."):format(#synced))
     end
     if #failed > 0 then
@@ -331,9 +375,7 @@ function AnkiConnect:sync_offline_notes()
                     self:forget_fingerprint(self:note_fingerprint(note), note.doc_path)
                 end
                 self.local_notes = {}
-                if self.latest_synced_note and self.latest_synced_note.state == "offline" then
-                    self.latest_synced_note = nil -- it was in the queue we just dropped
-                end
+                self.latest_note = nil -- it was in the queue we just dropped
             end
         })
     end
@@ -350,50 +392,35 @@ function AnkiConnect:show_popup(text, timeout, show_always)
     UIManager:show(InfoMessage:new { text = text, timeout = timeout })
 end
 
+--[[
+-- Undo of the last note made, which is a local matter: it is still sitting in the queue.
+-- Once it has been synced it is Anki's, and the menu entry that gets here is greyed out.
+--]]
 function AnkiConnect:delete_latest_note()
-    local latest = self.latest_synced_note
+    local latest = self.latest_note
     if not latest then
         return
     end
-    if latest.state == "online" then
-        local can_sync, err = self:is_running(conf.url:get_value())
-        if not can_sync then
-            return self:show_popup(("Could not delete synced note: %s"):format(err), 3, true)
-        end
-        local api_key = conf.api_key:get_value()
-        -- don't use rapidjson, the anki note ids are 64bit integers, they are turned into different numbers by the json library
-        -- presumably because 32 vs 64 bit architecture
-        local delete_request = ([[{"action": "deleteNotes", "version": 6, "params": {"notes": [%d]}, "key": %s }]]):format(latest.id, api_key and ([["%s"]]):format(api_key) or "null")
-        local _, err = self:POST { payload = delete_request, url = conf.url:get_value() }
-        if err then
-            return self:show_popup(("Couldn't delete note: %s!"):format(err), 3, true)
-        end
-        self:show_popup(("Removed note (id: %s)"):format(latest.id), 3, true)
-        if latest.fingerprint then
-            self:forget_fingerprint(latest.fingerprint, latest.doc_path)
-        end
-    else
-        -- looked up by identity rather than taken off the end: the queue is only ever
-        -- appended to today, but "drop the last one" would quietly throw away somebody
-        -- else's note the moment that stops being true
-        local removed
-        for i = #self.local_notes, 1, -1 do
-            if self:note_fingerprint(self.local_notes[i]) == latest.fingerprint then
-                removed = table.remove(self.local_notes, i)
-                break
-            end
-        end
-        if not removed then
-            self.latest_synced_note = nil
-            return self:show_popup("That note is no longer in the queue.", 3, true)
-        end
-        self:forget_fingerprint(latest.fingerprint, latest.doc_path)
-        self:write_notes()
-        self:show_popup(("Removed note (word: %s)"):format(latest.id), 3, true)
+    -- looked up by identity rather than taken off the end: the queue is only ever
+    -- appended to today, but "drop the last one" would quietly throw away somebody
+    -- else's note the moment that stops being true
+    local _, queue_idx = self:queued_note(latest.fingerprint)
+    if not queue_idx then
+        self.latest_note = nil
+        return self:show_popup("That note is no longer in the queue.", 3, true)
     end
-    self.latest_synced_note = nil
+    table.remove(self.local_notes, queue_idx)
+    self:forget_fingerprint(latest.fingerprint, latest.doc_path)
+    self:write_notes()
+    self:show_popup(("Removed note (word: %s)"):format(latest.word), 3, true)
+    self.latest_note = nil
 end
 
+--[[
+-- Adds a note to the queue. Nothing is asked of the network here, so this cannot fail
+-- for the want of a connection and does not have to wait to find out: the only note
+-- turned away is one the book has given before.
+--]]
 function AnkiConnect:add_note(anki_note)
     local ok, note = pcall(anki_note.build, anki_note)
     if not ok then
@@ -401,55 +428,62 @@ function AnkiConnect:add_note(anki_note)
         return false, "build_failed"
     end
 
-    -- taken before the callbacks below, which cost a request each: no point fetching
-    -- audio or a translation for a note we are about to refuse
     local fingerprint = self:note_fingerprint(note)
     if self.known_fingerprints[fingerprint] then
         self:show_popup("Identical note already exists; skipping duplicate.", 6, true)
         return false, "duplicate_note"
     end
 
-    local can_sync, err = self:is_running(conf.url:get_value())
-    if not can_sync then
-        return self:store_offline(note, fingerprint, err)
-    end
-
-    if #self.local_notes > 0 then
-        UIManager:show(ConfirmBox:new {
-            text = "There are offline notes which can be synced!",
-            ok_text = "Synchronize",
-            cancel_text = "Cancel",
-            ok_callback = function()
-                self:sync_offline_notes()
-            end
-        })
-    end
-    local callback_ok = self:handle_callbacks(note, function(callback_err)
-        return self:show_popup(string.format("Error while handling callbacks:\n\n%s", callback_err), 3, true)
-    end)
-    if not callback_ok then return false, "callback_failed" end
-
-    local result, request_err = self:request_add_note(note.data)
-    if request_err then
-        self:show_popup(string.format("Error while synchronizing note:\n\n%s", request_err), 3, true)
-        return false, "sync_failed"
-    end
-    self.known_fingerprints[fingerprint] = true
-    self.latest_synced_note = { state = "online", id = result, fingerprint = fingerprint, doc_path = note.doc_path }
-    self.last_message_text = "" -- if we manage to sync once, a following error should be shown again
-    logger.info("note added succesfully: " .. result)
-    return true, "online"
-end
-
--- the caller has already fingerprinted the note and checked it for duplicates
-function AnkiConnect:store_offline(note, fingerprint, reason)
-    local id = note.data.fields[note.identifier]
     self.known_fingerprints[fingerprint] = true
     table.insert(self.local_notes, note)
     u.open_file(self.notes_filename, 'a', function(f) f:write(json.encode(note) .. '\n') end)
-    self.latest_synced_note = { state = "offline", id = id, fingerprint = fingerprint, doc_path = note.doc_path }
-    self:show_popup(string.format("%s\nStored note offline", reason), 3, false)
-    return true, "offline"
+    self.latest_note = {
+        word = note.data.fields[note.identifier],
+        fingerprint = fingerprint,
+        doc_path = note.doc_path,
+    }
+    -- nothing is shown here: adding is confirmed by whatever the user tapped to get
+    -- here, and the menu carries the count of what is waiting
+    logger.info(("note queued: %s (%d waiting)"):format(self.latest_note.word, #self.local_notes))
+    return true, "queued"
+end
+
+--[[
+-- Rewrites the passage a queued note was made from, instead of adding a second note for
+-- a word the book already gave. Everything the note still owes Anki - its audio, its
+-- translated context - is owed on the new passage now, and is fetched at sync time as
+-- it would have been anyway, so there is nothing to redo here.
+--
+-- @param old_fingerprint: the note's identity as it stands, i.e. before the new context
+-- @param anki_note: the note with the new context set on it, not built yet
+--]]
+function AnkiConnect:update_note_context(old_fingerprint, anki_note)
+    local _, queue_idx = self:queued_note(old_fingerprint)
+    if not queue_idx then
+        self:show_popup("This note has already been synced; edit it in Anki.", 5, true)
+        return false, "already_synced"
+    end
+
+    local ok, note = pcall(anki_note.build, anki_note)
+    if not ok then
+        self:show_popup(string.format("Error while creating note:\n\n%s", note), 10, true)
+        return false, "build_failed"
+    end
+    local fingerprint = self:note_fingerprint(note)
+    if fingerprint == old_fingerprint then
+        self:show_popup("The context did not change; nothing to update.", 3, true)
+        return false, "unchanged"
+    end
+    if self.known_fingerprints[fingerprint] then
+        self:show_popup("A note with this context already exists; skipping duplicate.", 6, true)
+        return false, "duplicate_note"
+    end
+
+    self.local_notes[queue_idx] = note
+    self:move_fingerprint(old_fingerprint, fingerprint)
+    self:write_notes()
+    self:show_popup("Updated the note's context.", 3, true)
+    return true, "queued"
 end
 
 --[[

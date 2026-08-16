@@ -53,7 +53,34 @@ function AnkiWidget:show_profiles_widget(opts)
     UIManager:show(self.profile_change_widget)
 end
 
+--[[
+-- The note's fingerprint if the book already has this note, nil otherwise. Working it
+-- out means building the note, which is why it happens here and not when a dictionary
+-- popup is merely opened: asking for this widget is a deliberate act, and the note that
+-- gets built is the very one an add or update goes on to use.
+--]]
+function AnkiWidget:existing_note_fingerprint(note)
+    local ok, built = pcall(note.build, note)
+    if not ok then
+        logger.warn("Could not build the note to look it up:", built)
+        return nil
+    end
+    local fingerprint = AnkiConnect:note_fingerprint(built)
+    return AnkiConnect.known_fingerprints[fingerprint] and fingerprint or nil
+end
+
+--[[
+-- Three states, and the widget is where the user gets to see which one they are in: a
+-- word the book hasn't given yet is added, one still waiting in the queue is edited, and
+-- one that has been synced is neither - it belongs to Anki now, and is edited there.
+--]]
 function AnkiWidget:show_config_widget()
+    local existing = self:existing_note_fingerprint(self.current_note)
+    local editable = existing ~= nil and AnkiConnect:queued_note(existing) ~= nil
+    local context_text = "Add with custom context"
+    if existing then
+        context_text = editable and "Update context" or "Update context (already synced)"
+    end
     local with_custom_tags_cb = function()
         self.current_note:add_tags(Configuration.custom_tags:get_value())
         AnkiConnect:add_note(self.current_note)
@@ -63,15 +90,15 @@ function AnkiWidget:show_config_widget()
         buttons = {
             {{ text = "Add with custom tags", id = "custom_tags", callback = with_custom_tags_cb }},
             {{
-                text = "Add with custom context",
+                text = context_text,
                 id = "custom_context",
-                enabled = self.current_note.contextual_lookup,
-                callback = function() self:set_profile(function() return self:show_custom_context_widget() end) end
+                enabled = self.current_note.contextual_lookup and (existing == nil or editable),
+                callback = function() self:set_profile(function() return self:show_custom_context_widget(existing) end) end
             }},
             {{
                 text = "Delete latest note",
                 id = "note_delete",
-                enabled = AnkiConnect.latest_synced_note ~= nil,
+                enabled = AnkiConnect.latest_note ~= nil,
                 callback = function()
                     AnkiConnect:delete_latest_note()
                     self.config_widget:onClose()
@@ -93,11 +120,17 @@ function AnkiWidget:show_config_widget()
     UIManager:show(self.config_widget)
 end
 
-function AnkiWidget:show_custom_context_widget()
+-- @param existing: fingerprint of the note the book already has, when there is one: the
+-- passage that note was made from is then rewritten instead of a second note being added
+function AnkiWidget:show_custom_context_widget(existing)
     local function on_save_cb()
         local m = self.context_menu
         self.current_note:set_custom_context(m.prev_s_cnt, m.prev_c_cnt, m.next_s_cnt, m.next_c_cnt)
-        AnkiConnect:add_note(self.current_note)
+        if existing then
+            AnkiConnect:update_note_context(existing, self.current_note)
+        else
+            AnkiConnect:add_note(self.current_note)
+        end
         self.context_menu:onClose()
         self.config_widget:onClose()
     end
@@ -264,9 +297,10 @@ function AnkiWidget:buildSettings()
         { text = ("Edit profiles"), sub_item_table = profiles },
         { text = ("anki-connect settings"), keep_menu_open = true, callback = function() self:show_connection_widget() end },
         {
-            text = ("Sync (%d) offline note(s)"):format(#AnkiConnect.local_notes),
+            -- the one way anything reaches Anki, so it says how much is waiting
+            text_func = function() return ("Sync (%d) note(s) to Anki"):format(#AnkiConnect.local_notes) end,
             enabled_func = function() return #AnkiConnect.local_notes > 0 end,
-            callback = function() self:check_conn(function() AnkiConnect:sync_offline_notes() end) end
+            callback = function() self:check_conn(function() AnkiConnect:sync_notes() end) end
         },
     }
 end
@@ -377,10 +411,11 @@ function AnkiWidget:set_profile(callback)
 end
 
 --[[
--- The dictionary popup stays open after a note was added, so relabel its button and grey
--- it out to confirm the card was created and that tapping again would do nothing. Holding
--- keeps working: the config widget is how the note that was just added is edited or taken
--- back, which is exactly what one wants right after adding it.
+-- The dictionary popup stays open after a note was made, so relabel its button and grey
+-- it out: that is the confirmation the add gets, and it says that tapping again would do
+-- nothing. It says queued rather than added because that is what happened - the note goes
+-- to Anki when the user syncs. Holding keeps working: the config widget is how the note
+-- that was just made is edited or taken back, which is what one wants right afterwards.
 --]]
 function AnkiWidget:mark_add_to_anki_button(popup_dict)
     local button = popup_dict.button_table and popup_dict.button_table:getButtonById("add_to_anki")
@@ -388,25 +423,29 @@ function AnkiWidget:mark_add_to_anki_button(popup_dict)
         return
     end
     button.allow_hold_when_disabled = true
-    button:setText(_("Added to Anki"), button.width)
+    button:setText(_("Queued for Anki"), button.width)
     button:disable()
     UIManager:setDirty(popup_dict, function()
         return "ui", button.dimen
     end)
 end
 
+-- the note goes into the local queue, so the anki-connect settings are not consulted
+-- here: they are what the sync needs, and the sync is where the user is asked for them
 function AnkiWidget:add_note_with_feedback(note_builder, on_added)
     self:set_profile(function()
-        self:check_conn(function()
-            local note = note_builder()
-            if not note then
-                return
-            end
-            local ok = AnkiConnect:add_note(note)
-            if ok and on_added then
-                on_added()
-            end
-        end)
+        local note = note_builder()
+        if not note then
+            return
+        end
+        local ok, status = AnkiConnect:add_note(note)
+        -- A refused duplicate is a note the book has already given, which is just what
+        -- the disabled button says. Only a note that failed to be built at all leaves
+        -- nothing behind, and keeps the button tappable. The status is passed on because
+        -- confirming an add and confirming a duplicate are not the same message.
+        if on_added and (ok or status == "duplicate_note") then
+            on_added(status)
+        end
     end)
 end
 
@@ -478,6 +517,13 @@ function AnkiWidget:handle_events()
                             end
                             self.current_note = AnkiNote:new_from_highlight(highlight.selected_text)
                             return self.current_note
+                        end, function(status)
+                            -- a highlight has no button to grey out, and the dialog it
+                            -- was made from is about to close, so this is the only place
+                            -- it can be confirmed. A duplicate has said its piece already.
+                            if status ~= "duplicate_note" then
+                                UIManager:show(InfoMessage:new { text = "Queued for Anki.", timeout = 2 })
+                            end
                         end)
                         highlight:onClose()
                     end,
