@@ -21,6 +21,7 @@ local AnkiNote = require("ankinote")
 local Configuration = require("anki_configuration")
 local NotesViewer = require("notesviewer")
 
+local QUEUED_NOTE_HIGHLIGHT_SECONDS = 2
 local AnkiWidget = WidgetContainer:extend {
     name = "anki_widget",
     known_document_profiles = LuaSettings:open(DataStorage:getSettingsDir() .. "/anki_profiles.lua"),
@@ -326,6 +327,82 @@ function AnkiWidget:show_notes_viewer()
     end
 end
 
+function AnkiWidget:clear_queued_note_highlight()
+    local active = self.queued_note_highlight
+    if not active then
+        return
+    end
+    if active.clear_callback then
+        UIManager:unschedule(active.clear_callback)
+    end
+    self.queued_note_highlight = nil
+
+    local ui = active.ui
+    if not ui or ui.document ~= active.document then
+        return
+    end
+    -- Do not remove a selection the reader made after our jump.
+    if ui.highlight and ui.highlight.selected_text ~= active.previous_selection then
+        return
+    end
+    if active.mode == "rolling" then
+        ui.document:clearSelection()
+    elseif active.highlight and active.highlight.temp == active.temp then
+        -- ReaderView clears this table on page turns, but also clear it when our
+        -- short-lived marker expires while the reader stays on the same page.
+        active.highlight.temp = active.previous_temp
+    end
+    UIManager:setDirty(ui.dialog or ui, "ui")
+end
+
+function AnkiWidget:highlight_queued_note_position(ui, position)
+    local active = {
+        ui = ui,
+        document = ui.document,
+        mode = position.mode == "paging" and "paging" or "rolling",
+    }
+
+    if active.mode == "rolling" then
+        if not position.pos1 or not ui.document.getTextFromXPointers then
+            return
+        end
+        active.previous_selection = ui.highlight and ui.highlight.selected_text
+        -- This creates KOReader's native, segmented selection for the exact
+        -- xpointer range. It is deliberately done after the jump so the range
+        -- is drawn on the newly visible text.
+        local selected_text = ui.document:getTextFromXPointers(
+            position.pos0, position.pos1, true)
+        if not selected_text then
+            return
+        end
+    else
+        local view_highlight = ui.view and ui.view.highlight
+        if not view_highlight or not ui.document.getPageBoxesFromPositions then
+            return
+        end
+        local page_position = position.pos0
+        local page = type(page_position) == "table" and page_position.page or page_position
+        local boxes = ui.document:getPageBoxesFromPositions(page, position.pos0, position.pos1)
+        if not boxes or #boxes == 0 then
+            return
+        end
+        active.highlight = view_highlight
+        active.previous_selection = ui.highlight and ui.highlight.selected_text
+        active.previous_temp = view_highlight.temp
+        active.temp = { [page] = boxes }
+        view_highlight.temp = active.temp
+    end
+
+    local function clear_callback()
+        if self.queued_note_highlight == active then
+            self:clear_queued_note_highlight()
+        end
+    end
+    active.clear_callback = clear_callback
+    self.queued_note_highlight = active
+    UIManager:scheduleIn(QUEUED_NOTE_HIGHLIGHT_SECONDS, clear_callback)
+    UIManager:setDirty(ui.dialog or ui, "ui")
+end
 function AnkiWidget:open_queued_note(note)
     local ReaderUI = require("apps/reader/readerui")
     local position = note and note.position
@@ -338,13 +415,17 @@ function AnkiWidget:open_queued_note(note)
 
     local function jump(ui)
         ui = ui or ReaderUI
+        self:clear_queued_note_highlight()
         if position.mode == "paging" then
             local page_position = position.pos0
             local page = type(page_position) == "table" and page_position.page or page_position
             ui:handleEvent(Event:new("GotoPage", page, page_position))
         else
-            ui:handleEvent(Event:new("GotoXPointer", position.pos0, position.pos1))
+            -- The exact range is highlighted below; omitting the second event
+            -- argument also suppresses KOReader's transient margin marker.
+            ui:handleEvent(Event:new("GotoXPointer", position.pos0))
         end
+        self:highlight_queued_note_position(ui, position)
     end
 
     if self.ui and self.ui.document and self.ui.document.file == note.doc_path then
@@ -556,6 +637,7 @@ end
 function AnkiWidget:handle_events()
     -- these all return false so that the event goes up the chain, other widgets might wanna react to these events
     self.onCloseWidget = function()
+        self:clear_queued_note_highlight()
         self.known_document_profiles:close()
         Configuration:save()
         -- the reader has flushed the book's settings by now, let go of them
@@ -564,6 +646,7 @@ function AnkiWidget:handle_events()
     end
 
     self.onSuspend = function()
+        self:clear_queued_note_highlight()
         Configuration:save()
     end
 
