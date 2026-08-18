@@ -261,6 +261,9 @@ function AnkiNote:build_word_note()
         -- the book this came from: a queued note outlives the session that made it, and
         -- dropping it again means taking its fingerprint back out of that book's sidecar
         doc_path = self.ui.document.file,
+        -- the position is kept outside the Anki payload so the viewer can return to the
+        -- source book without changing duplicate detection or the note sent to Anki
+        position = self.source_position,
     }
 end
 
@@ -296,6 +299,23 @@ function AnkiNote:build_highlight_note()
         identifier = conf.word_field:get_value(),
         context_field = conf.context_field:get_value(),
         doc_path = self.ui.document.file,
+        position = self.source_position,
+    }
+end
+
+local function copy_position_part(value)
+    return type(value) == "table" and util.tableDeepCopy(value) or value
+end
+
+function AnkiNote:get_source_position(selected_text)
+    selected_text = selected_text or (self.ui.highlight and self.ui.highlight.selected_text)
+    if not selected_text or not selected_text.pos0 then
+        return nil
+    end
+    return {
+        mode = self.ui.paging and "paging" or "rolling",
+        pos0 = copy_position_part(selected_text.pos0),
+        pos1 = copy_position_part(selected_text.pos1),
     }
 end
 
@@ -370,6 +390,7 @@ function AnkiNote:new(popup_dict)
         -- indicates that popup_dict relates to word in book
         -- this can still be set to false later when the user looks up a word in a book, but then modifies the looked up word
         contextual_lookup = self.ui.highlight.selected_text ~= nil,
+        source_position = self:get_source_position(),
         word_trim = { before = "", after = "" },
         tags = { "KOReader" },
     }
@@ -403,6 +424,7 @@ function AnkiNote:new_from_highlight(selected_text)
         window_list = { { word = selected } },
     }
     local note = self:new(popup_dict)
+    note.source_position = self:get_source_position(selected_text)
     note.is_highlight_note = true
     return note
 end

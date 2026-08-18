@@ -37,6 +37,9 @@ local AnkiConnect = require("ui/widget/widget"):extend{
     wifi_connected = NetworkMgr.isWifiOn and NetworkMgr:isWifiOn() or true,
     -- notes waiting to be handed to Anki, in the order they were made
     local_notes = {},
+    -- updated only when the queue length changes, for the menu entry
+    notes_count = 0,
+    notes_changed_callback = nil,
     --[[
     -- Fingerprints of the notes made from the book being read, whether they reached
     -- Anki or are still queued. A note whose fingerprint is in here is refused as a
@@ -189,10 +192,6 @@ end
 function AnkiConnect:move_fingerprint(old_fingerprint, fingerprint, doc_path)
     self:forget_fingerprint(old_fingerprint, doc_path)
     self:remember_fingerprint(fingerprint, doc_path)
-    local latest = self.latest_note
-    if latest and latest.fingerprint == old_fingerprint then
-        latest.fingerprint = fingerprint
-    end
 end
 
 --[[
@@ -385,13 +384,13 @@ function AnkiConnect:sync_notes()
         table.insert(sync_ok and synced or failed, note)
     end
     self.local_notes = failed
+    self:update_notes_count()
     -- written even when nothing failed, this way it also gets rid of the notes which we
     -- managed to sync, no need to keep those around
     self:write_notes()
     local sync_message_parts = {}
     if #synced > 0 then
         -- the notes which went are Anki's now: there is nothing left here to undo or edit
-        self.latest_note = nil
         table.insert(sync_message_parts, ("Finished synchronizing %d note(s)."):format(#synced))
     end
     if #failed > 0 then
@@ -413,7 +412,7 @@ function AnkiConnect:sync_notes()
                     self:forget_fingerprint(self:note_fingerprint(note), note.doc_path)
                 end
                 self.local_notes = {}
-                self.latest_note = nil -- it was in the queue we just dropped
+                self:update_notes_count()
             end
         })
     end
@@ -428,27 +427,6 @@ function AnkiConnect:show_popup(text, timeout, show_always)
     logger.info(("Displaying popup with message: '%s'"):format(text))
     self.last_message_text = text
     UIManager:show(InfoMessage:new { text = text, timeout = timeout })
-end
-
---[[
--- Undo of the last note made, which is a local matter: it is still sitting in the queue.
--- Once it has been synced it is Anki's, and the menu entry that gets here is greyed out.
---]]
-function AnkiConnect:delete_latest_note()
-    local latest = self.latest_note
-    if not latest then
-        return
-    end
-    -- looked up by identity rather than taken off the end: the queue is only ever
-    -- appended to today, but "drop the last one" would quietly throw away somebody
-    -- else's note the moment that stops being true
-    local _, queue_idx = self:queued_note(latest.fingerprint)
-    if not queue_idx then
-        self.latest_note = nil
-        return self:show_popup("That note is no longer in the queue.", 3, true)
-    end
-    self:remove_queued_note(queue_idx) -- which is what clears latest_note
-    self:show_popup(("Removed note (word: %s)"):format(latest.word), 3, true)
 end
 
 --[[
@@ -472,15 +450,11 @@ function AnkiConnect:add_note(anki_note)
     self.known_fingerprints[fingerprint] = true
     note.fingerprint = fingerprint -- worked out under this note's profile, see queued_fingerprint
     table.insert(self.local_notes, note)
+    self:update_notes_count()
     u.open_file(self.notes_filename, 'a', function(f) f:write(json.encode(note) .. '\n') end)
-    self.latest_note = {
-        word = note.data.fields[note.identifier],
-        fingerprint = fingerprint,
-        doc_path = note.doc_path,
-    }
     -- nothing is shown here: adding is confirmed by whatever the user tapped to get
     -- here, and the menu carries the count of what is waiting
-    logger.info(("note queued: %s (%d waiting)"):format(self.latest_note.word, #self.local_notes))
+    logger.info(("note queued: %s (%d waiting)"):format(note.data.fields[note.identifier], #self.local_notes))
     return true, "queued"
 end
 
@@ -523,39 +497,6 @@ function AnkiConnect:update_note_context(old_fingerprint, anki_note)
     return true, "queued"
 end
 
---[[
--- Rewrites fields of a queued note by hand, which is what the notes viewer does. The
--- note's identity is made out of its fields, so it moves with them; a change that would
--- turn the note into one its book already has is refused and rolled back, the same way
--- adding that note would have been.
---]]
-function AnkiConnect:edit_queued_note(index, fields)
-    local note = self.local_notes[index]
-    if not note then
-        return false, "unknown_note"
-    end
-    local old_fingerprint = self:queued_fingerprint(note)
-    local previous = {}
-    for name, value in pairs(fields) do
-        previous[name] = note.data.fields[name]
-        note.data.fields[name] = value
-    end
-    local fingerprint = self:note_fingerprint(note)
-    if fingerprint == old_fingerprint then
-        return true, "unchanged"
-    end
-    if self:fingerprint_known(fingerprint, note.doc_path) then
-        for name, value in pairs(previous) do
-            note.data.fields[name] = value
-        end
-        return false, "duplicate_note"
-    end
-    note.fingerprint = fingerprint
-    self:move_fingerprint(old_fingerprint, fingerprint, note.doc_path)
-    self:write_notes()
-    return true, "edited"
-end
-
 -- drops a queued note, and with it the claim its book had on that passage
 function AnkiConnect:remove_queued_note(index)
     local note = self.local_notes[index]
@@ -564,10 +505,8 @@ function AnkiConnect:remove_queued_note(index)
     end
     local fingerprint = self:queued_fingerprint(note)
     table.remove(self.local_notes, index)
+    self:update_notes_count()
     self:forget_fingerprint(fingerprint, note.doc_path)
-    if self.latest_note and self.latest_note.fingerprint == fingerprint then
-        self.latest_note = nil
-    end
     self:write_notes()
     return true
 end
@@ -593,8 +532,21 @@ function AnkiConnect:load_notes()
             end
         end
     end)
+    self:update_notes_count()
     self:write_notes() -- drops the duplicates that were skipped, if there were any
     logger.dbg(("Loaded %d notes from disk."):format(#self.local_notes))
+end
+
+-- Keep the menu count cheap to read, and refresh an already open menu only when it changes.
+function AnkiConnect:update_notes_count()
+    local count = #self.local_notes
+    if count == self.notes_count then
+        return
+    end
+    self.notes_count = count
+    if self.notes_changed_callback then
+        self.notes_changed_callback()
+    end
 end
 
 -- the queue on disk is the queue in memory: always write the whole thing back

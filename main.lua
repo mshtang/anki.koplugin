@@ -1,6 +1,7 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local CustomContextMenu = require("customcontextmenu")
+local Event = require("ui/event")
 local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
@@ -72,7 +73,8 @@ end
 
 --[[
 -- Three states, and the widget is where the user gets to see which one they are in: a
--- word the book hasn't given yet is added, one still waiting in the queue is edited, and
+-- word the book hasn't given yet is added, one still waiting in the queue is opened in
+-- its source book, and
 -- one that has been synced is neither - it belongs to Anki now, and is edited there.
 --]]
 function AnkiWidget:show_config_widget()
@@ -95,15 +97,6 @@ function AnkiWidget:show_config_widget()
                 id = "custom_context",
                 enabled = self.current_note.contextual_lookup and (existing == nil or editable),
                 callback = function() self:set_profile(function() return self:show_custom_context_widget(existing) end) end
-            }},
-            {{
-                text = "Delete latest note",
-                id = "note_delete",
-                enabled = AnkiConnect.latest_note ~= nil,
-                callback = function()
-                    AnkiConnect:delete_latest_note()
-                    self.config_widget:onClose()
-                end
             }},
             {{
                 text = "Change profile",
@@ -300,8 +293,8 @@ function AnkiWidget:buildSettings()
         {
             -- where the queue is looked over before it goes anywhere, so it says how
             -- much is in it: this is the one route to Anki, and the count is the nudge
-            text_func = function() return ("View notes (%d)"):format(#AnkiConnect.local_notes) end,
-            enabled_func = function() return #AnkiConnect.local_notes > 0 end,
+            text_func = function() return ("View notes (%d)"):format(AnkiConnect.notes_count) end,
+            enabled_func = function() return AnkiConnect.notes_count > 0 end,
             keep_menu_open = true,
             callback = function() self:show_notes_viewer() end
         },
@@ -310,7 +303,8 @@ end
 
 --[[
 -- Opens the queue for inspection, under a profile. Which fields make up a note's identity
--- is the profile's business, and the view is where notes are removed and edited - so
+-- is the profile's business, and the view is where notes are removed or opened in their
+-- source book - so
 -- without one loaded, a note queued before it carried its own identity would be worked
 -- out differently here than it was when it was made, and removing it would release the
 -- wrong fingerprint (or none), leaving the word refused as a duplicate ever after.
@@ -319,12 +313,56 @@ end
 --]]
 function AnkiWidget:show_notes_viewer()
     local function open()
-        NotesViewer:show(function() self:check_conn(function() AnkiConnect:sync_notes() end) end)
+        NotesViewer:show(
+            function() self:check_conn(function() AnkiConnect:sync_notes() end) end,
+            function() self:refresh_notes_menu() end,
+            function(note) self:open_queued_note(note) end
+        )
     end
     if self.ui and self.ui.document then
         self:set_profile(open)
     else
         open()
+    end
+end
+
+function AnkiWidget:open_queued_note(note)
+    local ReaderUI = require("apps/reader/readerui")
+    local position = note and note.position
+    if not note or not note.doc_path or not position or not position.pos0 then
+        return UIManager:show(InfoMessage:new{
+            text = "This note has no saved position in its book.",
+            timeout = 4,
+        })
+    end
+
+    local function jump(ui)
+        ui = ui or ReaderUI
+        if position.mode == "paging" then
+            local page_position = position.pos0
+            local page = type(page_position) == "table" and page_position.page or page_position
+            ui:handleEvent(Event:new("GotoPage", page, page_position))
+        else
+            ui:handleEvent(Event:new("GotoXPointer", position.pos0, position.pos1))
+        end
+    end
+
+    if self.ui and self.ui.document and self.ui.document.file == note.doc_path then
+        return jump(self.ui)
+    end
+    if self.ui and self.ui.document and self.ui.switchDocument then
+        return self.ui:switchDocument(note.doc_path, nil, jump)
+    end
+    ReaderUI:showReader(note.doc_path, nil, nil, nil, jump)
+end
+
+-- Refresh only an open menu. A newly opened menu evaluates the dynamic text itself.
+function AnkiWidget:refresh_notes_menu()
+    local menu = self.ui and self.ui.menu
+    local menu_container = menu and menu.menu_container
+    local menu_widget = menu_container and menu_container[1]
+    if menu_widget and menu_widget.updateItems then
+        menu_widget:updateItems()
     end
 end
 
@@ -362,6 +400,7 @@ function AnkiWidget:init()
     self:load_extensions()
     -- allow propagating events to ankiconnect, we handle wifi related stuff in there
     table.insert(self, AnkiConnect)
+    AnkiConnect.notes_changed_callback = function() self:refresh_notes_menu() end
     AnkiConnect:load_notes()
     AnkiNote:extend {
         ui = self.ui,
@@ -438,7 +477,8 @@ end
 -- it out: that is the confirmation the add gets, and it says that tapping again would do
 -- nothing. It says queued rather than added because that is what happened - the note goes
 -- to Anki when the user syncs. Holding keeps working: the config widget is how the note
--- that was just made is edited or taken back, which is what one wants right afterwards.
+-- that was just made is edited, which is what one wants right afterwards. Queued notes
+-- can be removed from the notes viewer.
 --]]
 function AnkiWidget:mark_add_to_anki_button(popup_dict)
     local button = popup_dict.button_table and popup_dict.button_table:getButtonById("add_to_anki")
@@ -520,6 +560,7 @@ function AnkiWidget:handle_events()
         Configuration:save()
         -- the reader has flushed the book's settings by now, let go of them
         AnkiConnect:unload_fingerprints()
+        AnkiConnect.notes_changed_callback = nil
     end
 
     self.onSuspend = function()

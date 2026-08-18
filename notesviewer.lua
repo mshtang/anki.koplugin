@@ -1,8 +1,6 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
-local Device = require("device")
 local InfoMessage = require("ui/widget/infomessage")
-local InputDialog = require("ui/widget/inputdialog")
 local KeyValuePage = require("ui/widget/keyvaluepage")
 local UIManager = require("ui/uimanager")
 local util = require("util")
@@ -12,7 +10,8 @@ local conf = require("anki_configuration")
 --[[
 -- The queue of notes waiting for Anki, as a table one can go through: the word a note was
 -- made from on the left, the passage it sits in on the right. It is the one place where
--- what is about to be sent can be looked over, corrected or thrown out, which matters
+-- what is about to be sent can be looked over, opened in its source book or thrown out,
+-- which matters
 -- because the queue is where a note lives its whole life until the user syncs.
 --
 -- Notes from every book are in here, not only the one being read: it is one queue, and a
@@ -162,6 +161,9 @@ end
 
 -- the queue changed under it, so the page is built again from what is there now
 function NotesViewer:refresh()
+    if #AnkiConnect.local_notes == 0 then
+        return self:close()
+    end
     if self.page then
         UIManager:close(self.page)
         self.page = nil
@@ -182,7 +184,6 @@ function NotesViewer:actions_for(index, close)
     if not note then
         return {}
     end
-    local word_field, context_field = note_fields(note)
     local function act(fn)
         return function()
             close()
@@ -191,16 +192,13 @@ function NotesViewer:actions_for(index, close)
     end
     return {
         {{
-            text = "Edit word",
-            id = "edit_word",
-            enabled = word_field ~= nil,
-            callback = act(function() self:edit_field(index, word_field, "Word", false) end),
-        }},
-        {{
-            text = "Edit context",
-            id = "edit_context",
-            enabled = context_field ~= nil,
-            callback = act(function() self:edit_field(index, context_field, "Context", true) end),
+            text = "Open in book",
+            id = "open_in_book",
+            enabled = note.position and note.position.pos0 ~= nil and self.on_open ~= nil,
+            callback = act(function()
+                self:close()
+                if self.on_open then self.on_open(note) end
+            end),
         }},
         {{
             text = "Remove note",
@@ -219,57 +217,6 @@ function NotesViewer:show_actions(index)
         buttons = self:actions_for(index, function() UIManager:close(dialog) end),
     }
     UIManager:show(dialog)
-end
-
---[[
--- Edits one field of a queued note. The text is shown as it stands, tags and all: it is
--- what will reach Anki, the tags are what make the word stand out on the card, and
--- hiding them would mean guessing how to put them back.
---]]
-function NotesViewer:edit_field(index, field_name, description, multiline)
-    local note = AnkiConnect.local_notes[index]
-    if not note then
-        return self:refresh()
-    end
-    local dialog
-    dialog = InputDialog:new{
-        title = ("Edit %s"):format(description:lower()),
-        input = field_value(note, field_name) or "",
-        -- a passage is long and worth several lines; a word is one line and Enter on it
-        -- may as well mean "done"
-        allow_newline = multiline,
-        add_scroll_buttons = multiline,
-        text_height = multiline and math.floor(Device.screen:getHeight() * 0.25) or nil,
-        buttons = {{
-            {
-                text = "Cancel",
-                id = "close",
-                callback = function() UIManager:close(dialog) end,
-            },
-            {
-                text = "Save",
-                is_enter_default = not multiline,
-                callback = function()
-                    local text = dialog:getInputText()
-                    UIManager:close(dialog)
-                    self:save_field(index, field_name, text)
-                end,
-            },
-        }},
-    }
-    UIManager:show(dialog)
-    dialog:onShowKeyboard()
-end
-
-function NotesViewer:save_field(index, field_name, text)
-    local ok, status = AnkiConnect:edit_queued_note(index, { [field_name] = text })
-    if not ok and status == "duplicate_note" then
-        UIManager:show(InfoMessage:new{
-            text = "This book already has a note with that word and passage; the change was undone.",
-            timeout = 5,
-        })
-    end
-    self:refresh()
 end
 
 function NotesViewer:confirm_remove(index)
@@ -293,12 +240,15 @@ end
 -- @param on_sync: called when the user asks for the queue to go to Anki. Syncing needs
 -- the connection settings, which the plugin's widget is the one that knows how to ask
 -- for, so where the notes go is its business rather than this view's.
+-- @param on_open: opens a queued note at its saved source position.
 --]]
-function NotesViewer:show(on_sync)
+function NotesViewer:show(on_sync, on_close, on_open)
     self.on_sync = on_sync or self.on_sync
+    self.on_close = on_close or self.on_close
+    self.on_open = on_open or self.on_open
     local rows = self:rows()
     if #rows == 0 then
-        return UIManager:show(InfoMessage:new{ text = "No notes are waiting to be synced.", timeout = 3 })
+        return self:close()
     end
     self.page = KeyValuePage:new{
         title = ("Notes waiting for Anki (%d)"):format(#rows),
@@ -313,7 +263,10 @@ function NotesViewer:show(on_sync)
         title_bar_left_icon_hold_callback = function()
             UIManager:show(InfoMessage:new{ text = "Send these notes to Anki.", timeout = 3 })
         end,
-        close_callback = function() self.page = nil end,
+        close_callback = function()
+            self.page = nil
+            if self.on_close then self.on_close() end
+        end,
     }
     UIManager:show(self.page)
 end
