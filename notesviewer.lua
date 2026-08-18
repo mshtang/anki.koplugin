@@ -240,7 +240,14 @@ function NotesViewer:rows()
             text = TextBoxWidget.PTF_HEADER .. TextBoxWidget.PTF_BOLD_START .. label
                 .. TextBoxWidget.PTF_BOLD_END .. "  " .. entry.context,
             note_index = entry.index,
-            callback = function() self:show_note_details(entry.index) end,
+            callback = function()
+                -- Menu invokes close_callback after this callback, but that callback
+                -- only clears self.page. Close the actual menu before putting the
+                -- details viewer on top, otherwise the overview can remain underneath
+                -- and reappear when the details viewer is closed.
+                self:close()
+                self:show_note_details(entry.index)
+            end,
         })
     end
     return rows

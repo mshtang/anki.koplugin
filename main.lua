@@ -414,7 +414,17 @@ function AnkiWidget:open_queued_note(note)
     end
 
     local function jump(ui)
-        ui = ui or ReaderUI
+        -- A document switch creates a new ReaderUI instance. The plugin instance
+        -- which opened the viewer may still point at the old one, so prefer the
+        -- callback argument and otherwise use KOReader's current singleton.
+        ui = ui or ReaderUI.instance
+        if not ui or not ui.document then
+            logger.warn("Could not open queued note: reader is not available")
+            return UIManager:show(InfoMessage:new{
+                text = "Could not open the note's book.",
+                timeout = 4,
+            })
+        end
         self:clear_queued_note_highlight()
         if position.mode == "paging" then
             local page_position = position.pos0
@@ -428,11 +438,12 @@ function AnkiWidget:open_queued_note(note)
         self:highlight_queued_note_position(ui, position)
     end
 
-    if self.ui and self.ui.document and self.ui.document.file == note.doc_path then
-        return jump(self.ui)
+    local current_ui = ReaderUI.instance
+    if current_ui and current_ui.document and current_ui.document.file == note.doc_path then
+        return jump(current_ui)
     end
-    if self.ui and self.ui.document and self.ui.switchDocument then
-        return self.ui:switchDocument(note.doc_path, nil, jump)
+    if current_ui and current_ui.document and current_ui.switchDocument then
+        return current_ui:switchDocument(note.doc_path, nil, jump)
     end
     ReaderUI:showReader(note.doc_path, nil, nil, nil, jump)
 end
