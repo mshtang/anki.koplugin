@@ -558,7 +558,11 @@ end
 -- @param word: the selection itself
 -- @param nxt:  the text after the selection
 -- @param opts: character sets and the two limits (see WordContext.DEFAULTS)
--- @return before, after, need_more (need_more: the buffer ran out, refill and retry)
+-- @return before, after, need_more, counts
+--   need_more: the buffer ran out, refill and retry
+--   counts:    how many sentences were taken on either side, counted the way
+--              WordContext.manual takes them, so the same passage can be asked for
+--              again by hand (which is what the context menu opens on)
 --]]
 local function pull(it)
     local pos, wall_from, wall_to, edge = it()
@@ -583,24 +587,39 @@ function WordContext.extract(prev, word, nxt, opts)
     local prev_it, next_it = prev_stops(prev, prevE, cfg), next_stops(nxt, nxtE, cfg)
     local need_more = false
 
+    -- How far each iterator has been pulled, and which of those stops the context ended
+    -- up starting (ending) at. A stop is always the n-th one the iterator yields, so the
+    -- second number is exactly what WordContext.manual has to be given to land here again.
+    local prev_pulled, next_pulled, prev_used, next_used = 0, 0, 0, 0
+    local function pull_prev()
+        local stop = pull(prev_it)
+        if stop then prev_pulled = prev_pulled + 1 end
+        return stop
+    end
+    local function pull_next()
+        local stop = pull(next_it)
+        if stop then next_pulled = next_pulled + 1 end
+        return stop
+    end
+
     -- the sentence the selection is in
     local p_start, n_end
-    local ps, ns = pull(prev_it), pull(next_it)
+    local ps, ns = pull_prev(), pull_next()
     if ps == nil then
         p_start, need_more = 1, true -- nothing to go by: the buffer may be too small
     elseif crosses_back(ps, #prev + 1) then
         p_start = #prev + 1 -- the selection starts its paragraph
     else
-        p_start, need_more = ps.pos, need_more or ps.edge
-        ps = pull(prev_it)
+        p_start, prev_used, need_more = ps.pos, prev_pulled, need_more or ps.edge
+        ps = pull_prev()
     end
     if ns == nil then
         n_end, need_more = #nxt, true
     elseif crosses_forward(ns, 0) then
         n_end = 0
     else
-        n_end, need_more = ns.pos, need_more or ns.edge
-        ns = pull(next_it)
+        n_end, next_used, need_more = ns.pos, next_pulled, need_more or ns.edge
+        ns = pull_next()
     end
 
     -- ... extended with whole sentences until it carries enough words. Sentences
@@ -611,22 +630,22 @@ function WordContext.extract(prev, word, nxt, opts)
     while words < min_words and sentences < max_sentences do
         if ps and not crosses_back(ps, p_start) then
             words = words + count_words(prev, ps.pos, p_start - 1)
-            p_start, need_more = ps.pos, need_more or ps.edge
-            ps = pull(prev_it)
+            p_start, prev_used, need_more = ps.pos, prev_pulled, need_more or ps.edge
+            ps = pull_prev()
         elseif ns and not crosses_forward(ns, n_end) then
             words = words + count_words(nxt, n_end + 1, ns.pos)
-            n_end, need_more = ns.pos, need_more or ns.edge
-            ns = pull(next_it)
+            n_end, next_used, need_more = ns.pos, next_pulled, need_more or ns.edge
+            ns = pull_next()
         elseif ps and not back_crossed then
             back_crossed = true
             words = words + count_words(prev, ps.pos, ps.wall_from - 1)
-            p_start, need_more = ps.pos, need_more or ps.edge
-            ps = pull(prev_it)
+            p_start, prev_used, need_more = ps.pos, prev_pulled, need_more or ps.edge
+            ps = pull_prev()
         elseif ns and not forward_crossed then
             forward_crossed = true
             words = words + count_words(nxt, ns.wall_to + 1, ns.pos)
-            n_end, need_more = ns.pos, need_more or ns.edge
-            ns = pull(next_it)
+            n_end, next_used, need_more = ns.pos, next_pulled, need_more or ns.edge
+            ns = pull_next()
         else
             -- out of text rather than out of budget: worth another look at the book
             if not ps or not ns then need_more = true end
@@ -637,7 +656,7 @@ function WordContext.extract(prev, word, nxt, opts)
 
     local before, after = render(prev, prevE, split_pieces(prev, prevE, p_start, #prev),
                                 word, nxt, nxtE, split_pieces(nxt, nxtE, 1, n_end), cfg)
-    return before, after, need_more
+    return before, after, need_more, { prev_s = prev_used, next_s = next_used }
 end
 
 -- first byte of the character that byte `i` is part of

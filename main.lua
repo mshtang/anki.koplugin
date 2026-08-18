@@ -1,6 +1,7 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local CustomContextMenu = require("customcontextmenu")
+local Event = require("ui/event")
 local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
@@ -18,7 +19,9 @@ local lfs = require("libs/libkoreader-lfs")
 local AnkiConnect = require("ankiconnect")
 local AnkiNote = require("ankinote")
 local Configuration = require("anki_configuration")
+local NotesViewer = require("notesviewer")
 
+local QUEUED_NOTE_HIGHLIGHT_SECONDS = 2
 local AnkiWidget = WidgetContainer:extend {
     name = "anki_widget",
     known_document_profiles = LuaSettings:open(DataStorage:getSettingsDir() .. "/anki_profiles.lua"),
@@ -53,7 +56,35 @@ function AnkiWidget:show_profiles_widget(opts)
     UIManager:show(self.profile_change_widget)
 end
 
+--[[
+-- The note's fingerprint if the book already has this note, nil otherwise. Working it
+-- out means building the note, which is why it happens here and not when a dictionary
+-- popup is merely opened: asking for this widget is a deliberate act, and the note that
+-- gets built is the very one an add or update goes on to use.
+--]]
+function AnkiWidget:existing_note_fingerprint(note)
+    local ok, built = pcall(note.build, note)
+    if not ok then
+        logger.warn("Could not build the note to look it up:", built)
+        return nil
+    end
+    local fingerprint = AnkiConnect:note_fingerprint(built)
+    return AnkiConnect.known_fingerprints[fingerprint] and fingerprint or nil
+end
+
+--[[
+-- Three states, and the widget is where the user gets to see which one they are in: a
+-- word the book hasn't given yet is added, one still waiting in the queue is opened in
+-- its source book, and
+-- one that has been synced is neither - it belongs to Anki now, and is edited there.
+--]]
 function AnkiWidget:show_config_widget()
+    local existing = self:existing_note_fingerprint(self.current_note)
+    local editable = existing ~= nil and AnkiConnect:queued_note(existing) ~= nil
+    local context_text = "Add with custom context"
+    if existing then
+        context_text = editable and "Update context" or "Update context (already synced)"
+    end
     local with_custom_tags_cb = function()
         self.current_note:add_tags(Configuration.custom_tags:get_value())
         AnkiConnect:add_note(self.current_note)
@@ -63,19 +94,10 @@ function AnkiWidget:show_config_widget()
         buttons = {
             {{ text = "Add with custom tags", id = "custom_tags", callback = with_custom_tags_cb }},
             {{
-                text = "Add with custom context",
+                text = context_text,
                 id = "custom_context",
-                enabled = self.current_note.contextual_lookup,
-                callback = function() self:set_profile(function() return self:show_custom_context_widget() end) end
-            }},
-            {{
-                text = "Delete latest note",
-                id = "note_delete",
-                enabled = AnkiConnect.latest_synced_note ~= nil,
-                callback = function()
-                    AnkiConnect:delete_latest_note()
-                    self.config_widget:onClose()
-                end
+                enabled = self.current_note.contextual_lookup and (existing == nil or editable),
+                callback = function() self:set_profile(function() return self:show_custom_context_widget(existing) end) end
             }},
             {{
                 text = "Change profile",
@@ -93,11 +115,17 @@ function AnkiWidget:show_config_widget()
     UIManager:show(self.config_widget)
 end
 
-function AnkiWidget:show_custom_context_widget()
+-- @param existing: fingerprint of the note the book already has, when there is one: the
+-- passage that note was made from is then rewritten instead of a second note being added
+function AnkiWidget:show_custom_context_widget(existing)
     local function on_save_cb()
         local m = self.context_menu
         self.current_note:set_custom_context(m.prev_s_cnt, m.prev_c_cnt, m.next_s_cnt, m.next_c_cnt)
-        AnkiConnect:add_note(self.current_note)
+        if existing then
+            AnkiConnect:update_note_context(existing, self.current_note)
+        else
+            AnkiConnect:add_note(self.current_note)
+        end
         self.context_menu:onClose()
         self.config_widget:onClose()
     end
@@ -264,11 +292,170 @@ function AnkiWidget:buildSettings()
         { text = ("Edit profiles"), sub_item_table = profiles },
         { text = ("anki-connect settings"), keep_menu_open = true, callback = function() self:show_connection_widget() end },
         {
-            text = ("Sync (%d) offline note(s)"):format(#AnkiConnect.local_notes),
-            enabled_func = function() return #AnkiConnect.local_notes > 0 end,
-            callback = function() self:check_conn(function() AnkiConnect:sync_offline_notes() end) end
+            -- where the queue is looked over before it goes anywhere, so it says how
+            -- much is in it: this is the one route to Anki, and the count is the nudge
+            text_func = function() return ("View notes (%d)"):format(AnkiConnect.notes_count) end,
+            enabled_func = function() return AnkiConnect.notes_count > 0 end,
+            keep_menu_open = true,
+            callback = function() self:show_notes_viewer() end
         },
     }
+end
+
+--[[
+-- Opens the queue for inspection, under a profile. Which fields make up a note's identity
+-- is the profile's business, and the view is where notes are removed or opened in their
+-- source book - so
+-- without one loaded, a note queued before it carried its own identity would be worked
+-- out differently here than it was when it was made, and removing it would release the
+-- wrong fingerprint (or none), leaving the word refused as a duplicate ever after.
+-- Every other way into the plugin loads a profile for its own reasons; from the file
+-- browser there is no document to take one from, and notes made since carry their own.
+--]]
+function AnkiWidget:show_notes_viewer()
+    local function open()
+        NotesViewer:show(
+            function() self:check_conn(function() AnkiConnect:sync_notes() end) end,
+            function() self:refresh_notes_menu() end,
+            function(note) self:open_queued_note(note) end
+        )
+    end
+    if self.ui and self.ui.document then
+        self:set_profile(open)
+    else
+        open()
+    end
+end
+
+function AnkiWidget:clear_queued_note_highlight()
+    local active = self.queued_note_highlight
+    if not active then
+        return
+    end
+    if active.clear_callback then
+        UIManager:unschedule(active.clear_callback)
+    end
+    self.queued_note_highlight = nil
+
+    local ui = active.ui
+    if not ui or ui.document ~= active.document then
+        return
+    end
+    -- Do not remove a selection the reader made after our jump.
+    if ui.highlight and ui.highlight.selected_text ~= active.previous_selection then
+        return
+    end
+    if active.mode == "rolling" then
+        ui.document:clearSelection()
+    elseif active.highlight and active.highlight.temp == active.temp then
+        -- ReaderView clears this table on page turns, but also clear it when our
+        -- short-lived marker expires while the reader stays on the same page.
+        active.highlight.temp = active.previous_temp
+    end
+    UIManager:setDirty(ui.dialog or ui, "ui")
+end
+
+function AnkiWidget:highlight_queued_note_position(ui, position)
+    local active = {
+        ui = ui,
+        document = ui.document,
+        mode = position.mode == "paging" and "paging" or "rolling",
+    }
+
+    if active.mode == "rolling" then
+        if not position.pos1 or not ui.document.getTextFromXPointers then
+            return
+        end
+        active.previous_selection = ui.highlight and ui.highlight.selected_text
+        -- This creates KOReader's native, segmented selection for the exact
+        -- xpointer range. It is deliberately done after the jump so the range
+        -- is drawn on the newly visible text.
+        local selected_text = ui.document:getTextFromXPointers(
+            position.pos0, position.pos1, true)
+        if not selected_text then
+            return
+        end
+    else
+        local view_highlight = ui.view and ui.view.highlight
+        if not view_highlight or not ui.document.getPageBoxesFromPositions then
+            return
+        end
+        local page_position = position.pos0
+        local page = type(page_position) == "table" and page_position.page or page_position
+        local boxes = ui.document:getPageBoxesFromPositions(page, position.pos0, position.pos1)
+        if not boxes or #boxes == 0 then
+            return
+        end
+        active.highlight = view_highlight
+        active.previous_selection = ui.highlight and ui.highlight.selected_text
+        active.previous_temp = view_highlight.temp
+        active.temp = { [page] = boxes }
+        view_highlight.temp = active.temp
+    end
+
+    local function clear_callback()
+        if self.queued_note_highlight == active then
+            self:clear_queued_note_highlight()
+        end
+    end
+    active.clear_callback = clear_callback
+    self.queued_note_highlight = active
+    UIManager:scheduleIn(QUEUED_NOTE_HIGHLIGHT_SECONDS, clear_callback)
+    UIManager:setDirty(ui.dialog or ui, "ui")
+end
+function AnkiWidget:open_queued_note(note)
+    local ReaderUI = require("apps/reader/readerui")
+    local position = note and note.position
+    if not note or not note.doc_path or not position or not position.pos0 then
+        return UIManager:show(InfoMessage:new{
+            text = "This note has no saved position in its book.",
+            timeout = 4,
+        })
+    end
+
+    local function jump(ui)
+        -- A document switch creates a new ReaderUI instance. The plugin instance
+        -- which opened the viewer may still point at the old one, so prefer the
+        -- callback argument and otherwise use KOReader's current singleton.
+        ui = ui or ReaderUI.instance
+        if not ui or not ui.document then
+            logger.warn("Could not open queued note: reader is not available")
+            return UIManager:show(InfoMessage:new{
+                text = "Could not open the note's book.",
+                timeout = 4,
+            })
+        end
+        self:clear_queued_note_highlight()
+        if position.mode == "paging" then
+            local page_position = position.pos0
+            local page = type(page_position) == "table" and page_position.page or page_position
+            ui:handleEvent(Event:new("GotoPage", page, page_position))
+        else
+            -- The exact range is highlighted below; omitting the second event
+            -- argument also suppresses KOReader's transient margin marker.
+            ui:handleEvent(Event:new("GotoXPointer", position.pos0))
+        end
+        self:highlight_queued_note_position(ui, position)
+    end
+
+    local current_ui = ReaderUI.instance
+    if current_ui and current_ui.document and current_ui.document.file == note.doc_path then
+        return jump(current_ui)
+    end
+    if current_ui and current_ui.document and current_ui.switchDocument then
+        return current_ui:switchDocument(note.doc_path, nil, jump)
+    end
+    ReaderUI:showReader(note.doc_path, nil, nil, nil, jump)
+end
+
+-- Refresh only an open menu. A newly opened menu evaluates the dynamic text itself.
+function AnkiWidget:refresh_notes_menu()
+    local menu = self.ui and self.ui.menu
+    local menu_container = menu and menu.menu_container
+    local menu_widget = menu_container and menu_container[1]
+    if menu_widget and menu_widget.updateItems then
+        menu_widget:updateItems()
+    end
 end
 
 function AnkiWidget:check_conn(callback)
@@ -305,6 +492,7 @@ function AnkiWidget:init()
     self:load_extensions()
     -- allow propagating events to ankiconnect, we handle wifi related stuff in there
     table.insert(self, AnkiConnect)
+    AnkiConnect.notes_changed_callback = function() self:refresh_notes_menu() end
     AnkiConnect:load_notes()
     AnkiNote:extend {
         ui = self.ui,
@@ -377,10 +565,12 @@ function AnkiWidget:set_profile(callback)
 end
 
 --[[
--- The dictionary popup stays open after a note was added, so relabel its button and grey
--- it out to confirm the card was created and that tapping again would do nothing. Holding
--- keeps working: the config widget is how the note that was just added is edited or taken
--- back, which is exactly what one wants right after adding it.
+-- The dictionary popup stays open after a note was made, so relabel its button and grey
+-- it out: that is the confirmation the add gets, and it says that tapping again would do
+-- nothing. It says queued rather than added because that is what happened - the note goes
+-- to Anki when the user syncs. Holding keeps working: the config widget is how the note
+-- that was just made is edited, which is what one wants right afterwards. Queued notes
+-- can be removed from the notes viewer.
 --]]
 function AnkiWidget:mark_add_to_anki_button(popup_dict)
     local button = popup_dict.button_table and popup_dict.button_table:getButtonById("add_to_anki")
@@ -388,25 +578,29 @@ function AnkiWidget:mark_add_to_anki_button(popup_dict)
         return
     end
     button.allow_hold_when_disabled = true
-    button:setText(_("Added to Anki"), button.width)
+    button:setText(_("Queued for Anki"), button.width)
     button:disable()
     UIManager:setDirty(popup_dict, function()
         return "ui", button.dimen
     end)
 end
 
+-- the note goes into the local queue, so the anki-connect settings are not consulted
+-- here: they are what the sync needs, and the sync is where the user is asked for them
 function AnkiWidget:add_note_with_feedback(note_builder, on_added)
     self:set_profile(function()
-        self:check_conn(function()
-            local note = note_builder()
-            if not note then
-                return
-            end
-            local ok = AnkiConnect:add_note(note)
-            if ok and on_added then
-                on_added()
-            end
-        end)
+        local note = note_builder()
+        if not note then
+            return
+        end
+        local ok, status = AnkiConnect:add_note(note)
+        -- A refused duplicate is a note the book has already given, which is just what
+        -- the disabled button says. Only a note that failed to be built at all leaves
+        -- nothing behind, and keeps the button tappable. The status is passed on because
+        -- confirming an add and confirming a duplicate are not the same message.
+        if on_added and (ok or status == "duplicate_note") then
+            on_added(status)
+        end
     end)
 end
 
@@ -454,13 +648,16 @@ end
 function AnkiWidget:handle_events()
     -- these all return false so that the event goes up the chain, other widgets might wanna react to these events
     self.onCloseWidget = function()
+        self:clear_queued_note_highlight()
         self.known_document_profiles:close()
         Configuration:save()
         -- the reader has flushed the book's settings by now, let go of them
         AnkiConnect:unload_fingerprints()
+        AnkiConnect.notes_changed_callback = nil
     end
 
     self.onSuspend = function()
+        self:clear_queued_note_highlight()
         Configuration:save()
     end
 
@@ -478,6 +675,13 @@ function AnkiWidget:handle_events()
                             end
                             self.current_note = AnkiNote:new_from_highlight(highlight.selected_text)
                             return self.current_note
+                        end, function(status)
+                            -- a highlight has no button to grey out, and the dialog it
+                            -- was made from is about to close, so this is the only place
+                            -- it can be confirmed. A duplicate has said its piece already.
+                            if status ~= "duplicate_note" then
+                                UIManager:show(InfoMessage:new { text = "Queued for Anki.", timeout = 2 })
+                            end
                         end)
                         highlight:onClose()
                     end,

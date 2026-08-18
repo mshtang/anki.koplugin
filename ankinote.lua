@@ -85,7 +85,7 @@ end
 -- so the buffer starts out large enough for the usual case and grows in big steps.
 --]]
 function AnkiNote:run_extraction(extract)
-    local before, after, need_more = extract()
+    local before, after, need_more, counts = extract()
     for _ = 1, 2 do
         if not need_more then break end
         local size_before = #self.prev_context + #self.next_context
@@ -93,7 +93,7 @@ function AnkiNote:run_extraction(extract)
         self:init_context_buffer(self.context_size)
         -- no growth means we're at the start/end of the document: this is all there is
         if #self.prev_context + #self.next_context <= size_before then break end
-        before, after, need_more = extract()
+        before, after, need_more, counts = extract()
     end
     -- these 2 variables can be used to detect if any content was prepended / appended
     self.has_prepended_content = #before > 0
@@ -103,7 +103,7 @@ function AnkiNote:run_extraction(extract)
         if #before > 0 then before = before .. ' ' end
         if #after > 0 then after = ' ' .. after end
     end
-    return before, after
+    return before, after, counts
 end
 
 function AnkiNote:build_context()
@@ -116,13 +116,30 @@ function AnkiNote:build_context()
     if self.context then -- the user picked the amount of context by hand
         before, after = self:get_custom_context(unpack(self.context))
     else
-        local opts, word = self:context_opts(), self.popup_dict.word
-        before, after = self:run_extraction(function()
+        local opts, word, counts = self:context_opts(), self.popup_dict.word
+        before, after, counts = self:run_extraction(function()
             return WordContext.extract(self.prev_context, word, self.next_context, opts)
         end)
+        -- kept so the context menu can be opened on this very passage, see below
+        self.auto_context_counts = counts and
+            { prev_s = counts.prev_s, prev_c = 0, next_s = counts.next_s, next_c = 0 }
     end
     self.cached_context = { before, after }
     return before, after
+end
+
+--[[
+-- How much context the automatic extraction settled on, counted in the sentences and
+-- characters the context menu works in. Picking the context by hand starts from this,
+-- so the menu opens on the passage the card would have gotten anyway instead of on a
+-- bare sentence the user then has to build back up.
+--]]
+function AnkiNote:get_auto_context_counts()
+    if not self.auto_context_counts and not self.context then
+        self:build_context() -- works them out on the way
+    end
+    -- a note whose context was already picked by hand has none to report
+    return self.auto_context_counts or { prev_s = 1, prev_c = 0, next_s = 1, next_c = 0 }
 end
 
 --[[
@@ -175,10 +192,20 @@ function AnkiNote:get_definition()
     }
 end
 
+--[[
+-- The built note is kept: the config widget builds one to find out whether the book
+-- already has this note, and the add (or update) which follows would otherwise build a
+-- second one - which for a CBZ means a second screenshot written to disk. Everything
+-- that changes what the note is made of drops it again.
+--]]
 function AnkiNote:build()
-    if self.is_highlight_note then
-        return self:build_highlight_note()
+    if not self.built_note then
+        self.built_note = self.is_highlight_note and self:build_highlight_note() or self:build_word_note()
     end
+    return self.built_note
+end
+
+function AnkiNote:build_word_note()
     local fields = {
         [conf.word_field:get_value()] = self.popup_dict.word,
         [conf.def_field:get_value()] = self:get_definition()
@@ -227,9 +254,16 @@ function AnkiNote:build()
         },
         -- used as id to detect duplicates when storing notes offline
         identifier = conf.word_field:get_value(),
+        -- which field holds the passage. Kept with the note rather than looked up when
+        -- it is needed: a queued note can be made under one profile and looked at under
+        -- another, and the field names are the profile's, not the note's.
+        context_field = conf.context_field:get_value(),
         -- the book this came from: a queued note outlives the session that made it, and
         -- dropping it again means taking its fingerprint back out of that book's sidecar
         doc_path = self.ui.document.file,
+        -- the position is kept outside the Anki payload so the viewer can return to the
+        -- source book without changing duplicate detection or the note sent to Anki
+        position = self.source_position,
     }
 end
 
@@ -263,7 +297,25 @@ function AnkiNote:build_highlight_note()
         data = note,
         field_callbacks = {},
         identifier = conf.word_field:get_value(),
+        context_field = conf.context_field:get_value(),
         doc_path = self.ui.document.file,
+        position = self.source_position,
+    }
+end
+
+local function copy_position_part(value)
+    return type(value) == "table" and util.tableDeepCopy(value) or value
+end
+
+function AnkiNote:get_source_position(selected_text)
+    selected_text = selected_text or (self.ui.highlight and self.ui.highlight.selected_text)
+    if not selected_text or not selected_text.pos0 then
+        return nil
+    end
+    return {
+        mode = self.ui.paging and "paging" or "rolling",
+        pos0 = copy_position_part(selected_text.pos0),
+        pos1 = copy_position_part(selected_text.pos1),
     }
 end
 
@@ -294,12 +346,14 @@ end
 function AnkiNote:set_custom_context(pre_s, pre_c, post_s, post_c)
     self.context = { pre_s, pre_c, post_s, post_c }
     self.cached_context = nil
+    self.built_note = nil
 end
 
 function AnkiNote:add_tags(tags)
     for _,t in ipairs(tags) do
         table.insert(self.tags, t)
     end
+    self.built_note = nil
 end
 
 -- each user extension gets access to the AnkiNote table as well
@@ -336,6 +390,7 @@ function AnkiNote:new(popup_dict)
         -- indicates that popup_dict relates to word in book
         -- this can still be set to false later when the user looks up a word in a book, but then modifies the looked up word
         contextual_lookup = self.ui.highlight.selected_text ~= nil,
+        source_position = self:get_source_position(),
         word_trim = { before = "", after = "" },
         tags = { "KOReader" },
     }
@@ -369,6 +424,7 @@ function AnkiNote:new_from_highlight(selected_text)
         window_list = { { word = selected } },
     }
     local note = self:new(popup_dict)
+    note.source_position = self:get_source_position(selected_text)
     note.is_highlight_note = true
     return note
 end
