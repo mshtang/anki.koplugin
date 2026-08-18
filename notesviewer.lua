@@ -1,7 +1,8 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
-local KeyValuePage = require("ui/widget/keyvaluepage")
+local Menu = require("ui/widget/menu")
+local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
 local util = require("util")
@@ -9,11 +10,10 @@ local AnkiConnect = require("ankiconnect")
 local conf = require("anki_configuration")
 
 --[[
--- The queue of notes waiting for Anki, as a table one can go through: the word a note was
--- made from on the left, the passage it sits in on the right. It is the one place where
--- what is about to be sent can be looked over, opened in its source book or thrown out,
--- which matters
--- because the queue is where a note lives its whole life until the user syncs.
+-- The queue of notes waiting for Anki, as a compact list grouped by source book. It is
+-- the one place where what is about to be sent can be looked over, opened in its source
+-- book or thrown out, which matters because the queue is where a note lives its whole
+-- life until the user syncs.
 --
 -- Notes from every book are in here, not only the one being read: it is one queue, and a
 -- reader who moves between books would otherwise not find half of what they made.
@@ -22,10 +22,11 @@ local NotesViewer = {}
 
 -- How much of the passage a row carries. The word can sit anywhere in a sentence, so the
 -- row is a window around it rather than its first n characters, and both ends are cut.
--- Measured in the room a character takes rather than in bytes or characters; the widget
--- trims whatever still doesn't fit.
-local PREVIEW_BEFORE, PREVIEW_AFTER = 24, 36
+-- The menu wraps this into a compact two-to-three-line row.
+local PREVIEW_BEFORE, PREVIEW_AFTER = 40, 60
+local PREVIEW_TOTAL = PREVIEW_BEFORE + PREVIEW_AFTER
 local ELLIPSIS = "…"
+local SENTENCE_ENDINGS = { ".", "!", "?", "。", "！", "？" }
 
 -- Japanese and Chinese glyphs take about twice the room a Latin one does, and a row that
 -- counted them the same would come out twice as long for them. Same first byte test the
@@ -57,6 +58,30 @@ end
 
 local function file_name(path)
     return path and path:match("[^/\\]+$") or nil
+end
+local function last_sentence_end(text)
+    local last = 0
+    for _, ending in ipairs(SENTENCE_ENDINGS) do
+        local start = 1
+        while true do
+            local found = text:find(ending, start, true)
+            if not found then break end
+            last = math.max(last, found + #ending - 1)
+            start = found + #ending
+        end
+    end
+    return last
+end
+
+local function first_sentence_end(text)
+    local first
+    for _, ending in ipairs(SENTENCE_ENDINGS) do
+        local found = text:find(ending, 1, true)
+        if found and (not first or found < first) then
+            first = found + #ending - 1
+        end
+    end
+    return first
 end
 local function text_width(text)
     local width = 0
@@ -136,40 +161,87 @@ local function field_value(note, field_name)
     return field_name and note.data.fields[field_name] or nil
 end
 
---[[
--- The passage cut down to one row, centred on the word. The word is marked up in the
--- field (it is what is bold on the card), which is also how we find where it sits.
---]]
+-- The passage cut down to a few wrapped lines, centred on the word and kept within its
+-- sentence where possible. PTF is KOReader's lightweight bold markup for TextBoxWidget.
 local function context_preview(context)
     if not context or #context == 0 then
         return ""
     end
     local before, word, after = context:match("^(.-)<b>(.-)</b>(.*)$")
     if not word then
-        -- a highlight carries no looked up word, so there is nothing to centre on: the
-        -- row is the start of the passage, and gets the whole budget to itself
-        return trim(first_columns(to_plain_text(context), PREVIEW_BEFORE + PREVIEW_AFTER))
+        -- A highlight carries no looked-up word. Keep the beginning of its selected text,
+        -- but do not cut a short first sentence in half.
+        local text = trim(to_plain_text(context))
+        local sentence_end = first_sentence_end(text)
+        if sentence_end and text_width(text:sub(1, sentence_end)) <= PREVIEW_TOTAL
+            and sentence_end < #text then
+            return text:sub(1, sentence_end) .. ELLIPSIS
+        end
+        return trim(first_columns(text, PREVIEW_TOTAL))
     end
     local head, tail = to_plain_text(before), to_plain_text(after)
-    -- what the text in front of the word did not need is given to the text after it, so
-    -- a word at the start of its sentence still fills the row rather than half of it
-    local slack = math.max(0, PREVIEW_BEFORE - text_width(head))
-    return trim(last_columns(head, PREVIEW_BEFORE)
-             .. to_plain_text(word)
-             .. first_columns(tail, PREVIEW_AFTER + slack))
+    local sentence_start = last_sentence_end(head)
+    local sentence_end = first_sentence_end(tail)
+    local sentence_head = head:sub(sentence_start + 1)
+    local sentence_tail = sentence_end and tail:sub(1, sentence_end) or tail
+    local omitted_before = sentence_start > 0
+    local omitted_after = sentence_end and sentence_end < #tail
+    local marked_word = TextBoxWidget.PTF_BOLD_START .. to_plain_text(word)
+        .. TextBoxWidget.PTF_BOLD_END
+
+    -- Show the whole containing sentence when it is reasonably short. Otherwise, keep
+    -- the cut centred on the word and visibly mark omitted neighbouring sentences.
+    local sentence_text = sentence_head .. marked_word .. sentence_tail
+    if text_width(sentence_head .. to_plain_text(word) .. sentence_tail) <= PREVIEW_TOTAL then
+        return trim((omitted_before and ELLIPSIS or "") .. sentence_text
+            .. (omitted_after and ELLIPSIS or ""))
+    end
+
+    local head_preview = last_columns(sentence_head, PREVIEW_BEFORE)
+    local tail_preview = first_columns(sentence_tail, PREVIEW_AFTER)
+    return trim(head_preview .. marked_word .. tail_preview)
 end
 
 function NotesViewer:rows()
-    local rows = {}
+    local entries = {}
     for i, note in ipairs(AnkiConnect.local_notes) do
         local word_field, context_field = note_fields(note)
         local word = field_value(note, word_field) or ""
-        rows[i] = {
-            trim(to_plain_text(word)),
-            context_preview(field_value(note, context_field)),
-            callback = function() self:show_note_details(i) end,
-            hold_callback = function() self:show_actions(i) end,
-        }
+        local word_text = trim(to_plain_text(word))
+        table.insert(entries, {
+            index = i,
+            book = file_name(note.doc_path) or "Unknown book",
+            word = word_text,
+            context = context_preview(field_value(note, context_field)),
+        })
+    end
+
+    table.sort(entries, function(a, b)
+        local a_book, b_book = a.book:lower(), b.book:lower()
+        return a_book == b_book and a.index < b.index or a_book < b_book
+    end)
+
+    local rows = {}
+    local current_book
+    for _, entry in ipairs(entries) do
+        if entry.book ~= current_book then
+            current_book = entry.book
+            table.insert(rows, {
+                text = entry.book,
+                dim = true,
+                select_enabled = false,
+            })
+        end
+
+        local label = ""
+        table.insert(rows, {
+            -- Menu uses TextBoxWidget internally, so the looked-up word remains bold
+            -- while the context can wrap into the following lines.
+            text = TextBoxWidget.PTF_HEADER .. TextBoxWidget.PTF_BOLD_START .. label
+                .. TextBoxWidget.PTF_BOLD_END .. "  " .. entry.context,
+            note_index = entry.index,
+            callback = function() self:show_note_details(entry.index) end,
+        })
     end
     return rows
 end
@@ -215,12 +287,20 @@ function NotesViewer:show_note_details(index)
     local metadata_field = conf.meta_field:get_value()
     local translated_field = conf.translated_context_field:get_value()
     local title = trim(to_plain_text(word))
-    local content = {
-        detail_section("Context", context, true),
-        detail_section("Definition", field_value(note, definition_field), true),
-        detail_section("Translated context", field_value(note, translated_field), false),
-        detail_section("Metadata", field_value(note, metadata_field), false),
-    }
+    local content = {}
+    local function append_content(value)
+        if value and #value > 0 then
+            table.insert(content, value)
+        end
+    end
+    local function append_break()
+        if #content > 0 and content[#content] ~= "<hr/>" then
+            append_content("<hr/>")
+        end
+    end
+    if context and #context > 0 then
+        append_content("<div>" .. context .. "</div>")
+    end
 
     -- Keep fields added by extensions visible without duplicating the standard ones.
     local shown_fields = {}
@@ -237,9 +317,6 @@ function NotesViewer:show_note_details(index)
         end
     end
     table.sort(extra_fields)
-    for _, name in ipairs(extra_fields) do
-        table.insert(content, detail_section(name, fields[name], false))
-    end
 
     local info = {}
     if note.data.deckName then
@@ -251,12 +328,22 @@ function NotesViewer:show_note_details(index)
     if note.data.tags and #note.data.tags > 0 then
         table.insert(info, "Tags: " .. plain_field_html(table.concat(note.data.tags, ", ")))
     end
+    if #info > 0 then
+        append_break()
+        append_content("<div>" .. table.concat(info, "<br/>") .. "</div>")
+        append_break()
+    end
+
+    append_content(detail_section("Definition", field_value(note, definition_field), true))
+    append_content(detail_section("Translated context", field_value(note, translated_field), false))
+    append_content(detail_section("Metadata", field_value(note, metadata_field), false))
+    for _, name in ipairs(extra_fields) do
+        append_content(detail_section(name, fields[name], false))
+    end
     local source = file_name(note.doc_path)
     if source then
-        table.insert(info, "Source: " .. plain_field_html(source))
-    end
-    if #info > 0 then
-        table.insert(content, 1, "<p>" .. table.concat(info, "<br/>") .. "</p>")
+        append_break()
+        append_content("<div>Source: " .. plain_field_html(source) .. "</div>")
     end
 
     local details
@@ -356,21 +443,30 @@ function NotesViewer:show(on_sync, on_close, on_open)
     self.on_sync = on_sync or self.on_sync
     self.on_close = on_close or self.on_close
     self.on_open = on_open or self.on_open
+    local note_count = #AnkiConnect.local_notes
     local rows = self:rows()
-    if #rows == 0 then
+    if note_count == 0 then
         return self:close()
     end
-    self.page = KeyValuePage:new{
-        title = ("Notes waiting for Anki (%d)"):format(#rows),
-        kv_pairs = rows,
+    self.page = Menu:new {
+        title = ("Notes waiting for Anki (%d)"):format(note_count),
+        item_table = rows,
+        items_max_lines = 3,
+        multilines_forced = true,
+        is_popout = false,
+        onMenuHold = function(_, item)
+            if item.note_index then
+                self:show_actions(item.note_index)
+            end
+        end,
         -- the title bar carries the two things done to the queue as a whole: send it
         -- off (the tick, on the left) or leave it be (the close button, on the right)
         title_bar_left_icon = "check",
-        title_bar_left_icon_tap_callback = function()
+        onLeftButtonTap = function()
             self:close()
             if self.on_sync then self.on_sync() end
         end,
-        title_bar_left_icon_hold_callback = function()
+        onLeftButtonHold = function()
             UIManager:show(InfoMessage:new{ text = "Send these notes to Anki.", timeout = 3 })
         end,
         close_callback = function()
