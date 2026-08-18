@@ -2,6 +2,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
 local KeyValuePage = require("ui/widget/keyvaluepage")
+local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
 local util = require("util")
 local AnkiConnect = require("ankiconnect")
@@ -44,6 +45,19 @@ local function trim(text)
     return (text:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+local function escape_html(text)
+    return tostring(text):gsub("&", "&amp;"):gsub("<", "&lt;")
+        :gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&#39;")
+end
+
+local function plain_field_html(value)
+    local text = tostring(value):gsub("\r\n?", "\n")
+    return escape_html(text):gsub("\n", "<br/>")
+end
+
+local function file_name(path)
+    return path and path:match("[^/\\]+$") or nil
+end
 local function text_width(text)
     local width = 0
     for _, ch in ipairs(util.splitToChars(text)) do width = width + char_width(ch) end
@@ -153,7 +167,8 @@ function NotesViewer:rows()
         rows[i] = {
             trim(to_plain_text(word)),
             context_preview(field_value(note, context_field)),
-            callback = function() self:show_actions(i) end,
+            callback = function() self:show_note_details(i) end,
+            hold_callback = function() self:show_actions(i) end,
         }
     end
     return rows
@@ -178,6 +193,101 @@ function NotesViewer:close()
     end
 end
 
+local function detail_section(title, value, is_html)
+    if not value or #value == 0 then
+        return ""
+    end
+    local content = is_html and value or plain_field_html(value)
+    return ("<h2>%s</h2><p>%s</p>"):format(escape_html(title), content)
+end
+
+function NotesViewer:show_note_details(index)
+    local note = AnkiConnect.local_notes[index]
+    if not note then
+        return self:refresh()
+    end
+
+    local fields = note.data and note.data.fields or {}
+    local word_field, context_field = note_fields(note)
+    local word = field_value(note, word_field) or ""
+    local context = field_value(note, context_field)
+    local definition_field = conf.def_field:get_value()
+    local metadata_field = conf.meta_field:get_value()
+    local translated_field = conf.translated_context_field:get_value()
+    local title = trim(to_plain_text(word))
+    local content = {
+        detail_section("Context", context, true),
+        detail_section("Definition", field_value(note, definition_field), true),
+        detail_section("Translated context", field_value(note, translated_field), false),
+        detail_section("Metadata", field_value(note, metadata_field), false),
+    }
+
+    -- Keep fields added by extensions visible without duplicating the standard ones.
+    local shown_fields = {}
+    for _, name in ipairs({ word_field, context_field, definition_field,
+        metadata_field, translated_field }) do
+        if name then
+            shown_fields[name] = true
+        end
+    end
+    local extra_fields = {}
+    for name, value in pairs(fields) do
+        if not shown_fields[name] and type(value) == "string" and #value > 0 then
+            table.insert(extra_fields, name)
+        end
+    end
+    table.sort(extra_fields)
+    for _, name in ipairs(extra_fields) do
+        table.insert(content, detail_section(name, fields[name], false))
+    end
+
+    local info = {}
+    if note.data.deckName then
+        table.insert(info, "Deck: " .. plain_field_html(note.data.deckName))
+    end
+    if note.data.modelName then
+        table.insert(info, "Note type: " .. plain_field_html(note.data.modelName))
+    end
+    if note.data.tags and #note.data.tags > 0 then
+        table.insert(info, "Tags: " .. plain_field_html(table.concat(note.data.tags, ", ")))
+    end
+    local source = file_name(note.doc_path)
+    if source then
+        table.insert(info, "Source: " .. plain_field_html(source))
+    end
+    if #info > 0 then
+        table.insert(content, 1, "<p>" .. table.concat(info, "<br/>") .. "</p>")
+    end
+
+    local details
+    details = TextViewer:new {
+        title = #title > 0 and title or "Queued note",
+        text = table.concat(content),
+        text_format = "html",
+        text_type = "book_info",
+        buttons_table = {
+            { {
+                text = "Open in book",
+                enabled = note.position and note.position.pos0 ~= nil and self.on_open ~= nil,
+                callback = function()
+                    UIManager:close(details)
+                    self:close()
+                    if self.on_open then self.on_open(note) end
+                end,
+            }, {
+                text = "Remove note",
+                callback = function()
+                    UIManager:close(details)
+                    self:confirm_remove(index)
+                end,
+            }, {
+                text = "Close",
+                callback = function() UIManager:close(details) end,
+            } },
+        },
+    }
+    UIManager:show(details)
+end
 -- what can be done to one row, as the button rows a ButtonDialog takes
 function NotesViewer:actions_for(index, close)
     local note = AnkiConnect.local_notes[index]
