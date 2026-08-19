@@ -204,21 +204,30 @@ end
 
 function NotesViewer:rows()
     local entries = {}
+    local latest_by_book = {}
     for i, note in ipairs(AnkiConnect.local_notes) do
         local word_field, context_field = note_fields(note)
         local word = field_value(note, word_field) or ""
         local word_text = trim(to_plain_text(word))
-        table.insert(entries, {
+        local entry = {
             index = i,
             book = file_name(note.doc_path) or "Unknown book",
             word = word_text,
             context = context_preview(field_value(note, context_field)),
-        })
+        }
+        table.insert(entries, entry)
+        if not latest_by_book[entry.book] or entry.index > latest_by_book[entry.book] then
+            latest_by_book[entry.book] = entry.index
+        end
     end
 
+    -- Keep notes grouped by source book, while putting the book containing the newest
+    -- queued note first and showing that book's newest note at the top of its group.
     table.sort(entries, function(a, b)
-        local a_book, b_book = a.book:lower(), b.book:lower()
-        return a_book == b_book and a.index < b.index or a_book < b_book
+        if a.book == b.book then
+            return a.index > b.index
+        end
+        return latest_by_book[a.book] > latest_by_book[b.book]
     end)
 
     local rows = {}
