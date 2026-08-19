@@ -1,6 +1,7 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local CustomContextMenu = require("customcontextmenu")
+local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
 local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
@@ -22,6 +23,7 @@ local Configuration = require("anki_configuration")
 local NotesViewer = require("notesviewer")
 
 local QUEUED_NOTE_HIGHLIGHT_SECONDS = 2
+local ANKI_NOTES_VIEWER_ACTION = "anki_view_notes"
 local AnkiWidget = WidgetContainer:extend {
     name = "anki_widget",
     known_document_profiles = LuaSettings:open(DataStorage:getSettingsDir() .. "/anki_profiles.lua"),
@@ -327,6 +329,20 @@ function AnkiWidget:show_notes_viewer()
     end
 end
 
+function AnkiWidget:onDispatcherRegisterActions()
+    Dispatcher:registerAction(ANKI_NOTES_VIEWER_ACTION, {
+        category = "none",
+        event = "ShowAnkiNotes",
+        title = _("View Anki notes"),
+        general = true,
+    })
+end
+
+function AnkiWidget:onShowAnkiNotes()
+    self:show_notes_viewer()
+    return true
+end
+
 function AnkiWidget:clear_queued_note_highlight()
     local active = self.queued_note_highlight
     if not active then
@@ -490,6 +506,7 @@ end
 -- This function is called automatically for all tables extending from Widget
 function AnkiWidget:init()
     self:load_extensions()
+    self:onDispatcherRegisterActions()
     -- allow propagating events to ankiconnect, we handle wifi related stuff in there
     table.insert(self, AnkiConnect)
     AnkiConnect.notes_changed_callback = function() self:refresh_notes_menu() end
