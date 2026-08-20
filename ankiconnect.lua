@@ -20,6 +20,7 @@ local md5 = require("ffi/sha2").md5
 
 -- key the fingerprints are kept under in the book's sidecar (.sdr) settings
 local FINGERPRINTS_KEY = "anki_note_fingerprints"
+local SYNC_STEP_DELAY = 0.1
 
 --[[
 -- Making a note never touches the network. Adding one writes it to a local queue,
@@ -40,6 +41,9 @@ local AnkiConnect = require("ui/widget/widget"):extend{
     -- updated only when the queue length changes, for the menu entry
     notes_count = 0,
     notes_changed_callback = nil,
+    syncing = false,
+    sync_waiting = false,
+    _sync_task = nil,
     --[[
     -- Fingerprints of the notes made from the book being read, whether they reached
     -- Anki or are still queued. A note whose fingerprint is in here is refused as a
@@ -391,37 +395,22 @@ end
 -- audio, the translated context - is fetched here rather than when the note was made,
 -- so a single wake of the WiFi pays for the whole queue.
 --]]
-function AnkiConnect:sync_notes()
-    if NetworkMgr:willRerunWhenOnline(function() self:sync_notes() end) then
-        return
-    end
+function AnkiConnect:_finish_sync()
+    local synced = self._sync_synced
+    local failed = self._sync_failed
+    local errs = self._sync_errs
 
-    local can_sync, err = self:is_running(conf.url:get_value(), conf.api_key:get_value())
-    if not can_sync then
-        return self:show_popup(string.format("Synchronizing failed!\n%s", err), 3, true)
-    end
+    self.syncing = false
+    self._sync_task = nil
+    self._sync_pending = nil
+    self._sync_index = nil
+    self._sync_synced = nil
+    self._sync_failed = nil
+    self._sync_errs = nil
 
-    -- a queued note was written into its book's sidecar when it was made, and syncing
-    -- does not change its identity, so there is no fingerprint bookkeeping to do here
-    local synced, failed, errs = {}, {}, u.defaultdict(0)
-    for _,note in ipairs(self.local_notes) do
-        local sync_ok = self:handle_callbacks(note, function(callback_err)
-            errs[callback_err] = errs[callback_err] + 1
-        end)
-        if sync_ok then
-            local _, request_err = self:request_add_note(note.data)
-            if request_err then
-                sync_ok = false
-                errs[request_err] = errs[request_err] + 1
-            end
-        end
-        table.insert(sync_ok and synced or failed, note)
-    end
-    self.local_notes = failed
-    self:update_notes_count()
-    -- written even when nothing failed, this way it also gets rid of the notes which we
-    -- managed to sync, no need to keep those around
+    -- Callback fields may have been completed while processing failed notes.
     self:write_notes()
+
     local sync_message_parts = {}
     if #synced > 0 then
         -- the notes which went are Anki's now: there is nothing left here to undo or edit
@@ -456,6 +445,83 @@ function AnkiConnect:sync_notes()
         })
     end
     self:show_popup(table.concat(sync_message_parts, " "), 3, true)
+end
+
+function AnkiConnect:_sync_next_note()
+    local note = self._sync_pending[self._sync_index]
+    if not note then
+        return self:_finish_sync()
+    end
+    self._sync_index = self._sync_index + 1
+
+    -- The viewer is normally the only writer while syncing, but locate the note again
+    -- so an external queue change cannot make us process the wrong entry.
+    local note_index
+    for index, queued_note in ipairs(self.local_notes) do
+        if queued_note == note then
+            note_index = index
+            break
+        end
+    end
+    if note_index then
+        local sync_ok = self:handle_callbacks(note, function(callback_err)
+            self._sync_errs[callback_err] = self._sync_errs[callback_err] + 1
+        end)
+        if sync_ok then
+            local _, request_err = self:request_add_note(note.data)
+            if request_err then
+                sync_ok = false
+                self._sync_errs[request_err] = self._sync_errs[request_err] + 1
+            end
+        end
+
+        if sync_ok then
+            table.remove(self.local_notes, note_index)
+            table.insert(self._sync_synced, note)
+            self:update_notes_count()
+            self:write_notes()
+        else
+            table.insert(self._sync_failed, note)
+        end
+    end
+
+    if self.syncing then
+        UIManager:scheduleIn(SYNC_STEP_DELAY, self._sync_task, self)
+    end
+end
+
+function AnkiConnect:sync_notes()
+    if self.syncing or self.sync_waiting then
+        return false
+    end
+    if NetworkMgr:willRerunWhenOnline(function()
+        self.sync_waiting = false
+        self:sync_notes()
+    end) then
+        self.sync_waiting = true
+        return true
+    end
+
+    local can_sync, err = self:is_running(conf.url:get_value(), conf.api_key:get_value())
+    if not can_sync then
+        self:show_popup(string.format("Synchronizing failed!\n%s", err), 3, true)
+        return false
+    end
+
+    -- a queued note was written into its book's sidecar when it was made, and syncing
+    -- does not change its identity, so there is no fingerprint bookkeeping to do here
+    self.syncing = true
+    self._sync_pending = {}
+    for _, note in ipairs(self.local_notes) do
+        table.insert(self._sync_pending, note)
+    end
+    self._sync_index = 1
+    self._sync_synced = {}
+    self._sync_failed = {}
+    self._sync_errs = u.defaultdict(0)
+    self._sync_task = function() self:_sync_next_note() end
+    UIManager:nextTick(self._sync_task)
+    return true
 end
 
 function AnkiConnect:show_popup(text, timeout, show_always)

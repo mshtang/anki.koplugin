@@ -1,5 +1,6 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
+local IconWidget = require("ui/widget/iconwidget")
 local InfoMessage = require("ui/widget/infomessage")
 local Menu = require("ui/widget/menu")
 local TextBoxWidget = require("ui/widget/textboxwidget")
@@ -27,6 +28,8 @@ local PREVIEW_BEFORE, PREVIEW_AFTER = 40, 60
 local PREVIEW_TOTAL = PREVIEW_BEFORE + PREVIEW_AFTER
 local ELLIPSIS = "…"
 local SENTENCE_ENDINGS = { ".", "!", "?", "。", "！", "？" }
+local SYNC_REFRESH_INTERVAL = 2
+local SYNC_ICON = "anki.sync"
 
 -- Japanese and Chinese glyphs take about twice the room a Latin one does, and a row that
 -- counted them the same would come out twice as long for them. Same first byte test the
@@ -266,19 +269,75 @@ function NotesViewer:rows()
     return rows
 end
 
--- the queue changed under it, so the page is built again from what is there now
+function NotesViewer:update_sync_button()
+    local left_button = self.page and self.page.title_bar and self.page.title_bar.left_button
+    if left_button then
+        local enabled = #AnkiConnect.local_notes > 0
+            and not AnkiConnect.syncing and not AnkiConnect.sync_waiting
+        -- TitleBar uses IconButton, which intentionally has no Button's
+        -- enableDisable helper. Keep the visual state in sync; the tap callback
+        -- also guards this state so a disabled icon cannot start a sync.
+        left_button.enabled = enabled
+        left_button.image.dim = not enabled
+        UIManager:setDirty(self.page, "ui", left_button.dimen)
+    end
+end
+
+function NotesViewer:set_sync_icon_path(path)
+    self.sync_icon_path = path
+end
+
+function NotesViewer:use_sync_icon()
+    local left_button = self.page and self.page.title_bar and self.page.title_bar.left_button
+    if not left_button or not self.sync_icon_path or left_button.image.file == self.sync_icon_path then
+        return
+    end
+
+    local old_image = left_button.image
+    local image = IconWidget:new{
+        file = self.sync_icon_path,
+        width = left_button.width,
+        height = left_button.height,
+    }
+    left_button.image = image
+    left_button.horizontal_group[2] = image
+    old_image:free()
+    left_button:update()
+end
+
+-- Refreshing the existing Menu keeps the title bar and its close action stable while a
+-- sync removes notes one by one. It also avoids rebuilding the whole window for every
+-- progress update.
 function NotesViewer:refresh()
-    if #AnkiConnect.local_notes == 0 then
-        return self:close()
+    if not self.page then
+        return self:show()
     end
-    if self.page then
-        UIManager:close(self.page)
-        self.page = nil
+    local note_count = #AnkiConnect.local_notes
+    self.page:switchItemTable(
+        ("Notes waiting for Anki (%d)"):format(note_count),
+        self:rows(),
+        1
+    )
+    self:update_sync_button()
+end
+
+function NotesViewer:poll_sync()
+    if not self.page then
+        return
     end
-    self:show()
+    self:refresh()
+    if AnkiConnect.syncing or AnkiConnect.sync_waiting then
+        UIManager:scheduleIn(SYNC_REFRESH_INTERVAL, self.poll_sync, self)
+    end
+end
+
+function NotesViewer:start_sync_poll()
+    UIManager:unschedule(self.poll_sync)
+    UIManager:scheduleIn(SYNC_REFRESH_INTERVAL, self.poll_sync, self)
 end
 
 function NotesViewer:close()
+    UIManager:unschedule(self.poll_sync)
     if self.page then
         UIManager:close(self.page)
         self.page = nil
@@ -473,9 +532,6 @@ function NotesViewer:show(on_sync, on_close, on_open)
     self.on_open = on_open or self.on_open
     local note_count = #AnkiConnect.local_notes
     local rows = self:rows()
-    if note_count == 0 then
-        return self:close()
-    end
     self.page = Menu:new {
         title = ("Notes waiting for Anki (%d)"):format(note_count),
         item_table = rows,
@@ -488,21 +544,31 @@ function NotesViewer:show(on_sync, on_close, on_open)
             end
         end,
         -- the title bar carries the two things done to the queue as a whole: send it
-        -- off (the tick, on the left) or leave it be (the close button, on the right)
-        title_bar_left_icon = "check",
+        -- off (the reload/sync icon, on the left) or leave it be (the close button, on
+        -- the right)
+        title_bar_left_icon = SYNC_ICON,
         onLeftButtonTap = function()
-            self:close()
-            if self.on_sync then self.on_sync() end
+            if #AnkiConnect.local_notes == 0 or AnkiConnect.syncing
+                or AnkiConnect.sync_waiting then
+                return
+            end
+            if self.on_sync then
+                self.on_sync()
+                self:start_sync_poll()
+            end
         end,
         onLeftButtonHold = function()
             UIManager:show(InfoMessage:new{ text = "Send these notes to Anki.", timeout = 3 })
         end,
         close_callback = function()
+            UIManager:unschedule(self.poll_sync)
             self.page = nil
             if self.on_close then self.on_close() end
         end,
     }
     UIManager:show(self.page)
+    self:use_sync_icon()
+    self:update_sync_button()
 end
 
 return NotesViewer

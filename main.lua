@@ -1,9 +1,12 @@
+local DataStorage = require("datastorage")
+local lfs = require("libs/libkoreader-lfs")
+local SYNC_ICON_FILE = "anki.sync.svg"
+
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local CustomContextMenu = require("customcontextmenu")
 local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
-local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local LuaSettings = require("luasettings")
@@ -16,14 +19,14 @@ local logger = require("logger")
 local util = require("util")
 local _ = require("gettext")
 
-local lfs = require("libs/libkoreader-lfs")
 local AnkiConnect = require("ankiconnect")
 local AnkiNote = require("ankinote")
 local Configuration = require("anki_configuration")
-local NotesViewer = require("notesviewer")
 
 local QUEUED_NOTE_HIGHLIGHT_SECONDS = 2
 local ANKI_NOTES_VIEWER_ACTION = "anki_view_notes"
+
+local NotesViewer = require("notesviewer")
 
 local function valid_profile_name(name)
     return type(name) == "string" and #name > 0 and name ~= "." and name ~= ".."
@@ -537,6 +540,10 @@ end
 
 -- This function is called automatically for all tables extending from Widget
 function AnkiWidget:init()
+    local sync_icon_path = self.path and (self.path .. "/icons/" .. SYNC_ICON_FILE)
+    if sync_icon_path and lfs.attributes(sync_icon_path, "mode") == "file" then
+        NotesViewer:set_sync_icon_path(sync_icon_path)
+    end
     self:load_extensions()
     self:onDispatcherRegisterActions()
     -- allow propagating events to ankiconnect, we handle wifi related stuff in there
@@ -628,7 +635,7 @@ function AnkiWidget:mark_add_to_anki_button(popup_dict)
         return
     end
     button.allow_hold_when_disabled = true
-    button:setText(_("Queued for Anki"), button.width)
+    button:setText(_("Queued"), button.width)
     button:disable()
     UIManager:setDirty(popup_dict, function()
         return "ui", button.dimen
@@ -730,7 +737,7 @@ function AnkiWidget:handle_events()
                             -- was made from is about to close, so this is the only place
                             -- it can be confirmed. A duplicate has said its piece already.
                             if status ~= "duplicate_note" then
-                                UIManager:show(InfoMessage:new { text = "Queued for Anki.", timeout = 2 })
+                                UIManager:show(InfoMessage:new { text = "Queued for Anki.", timeout = 1 })
                             end
                         end)
                         highlight:onClose()
