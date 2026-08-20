@@ -25,7 +25,13 @@ local function GET(url)
         },
         sink = ltn12.sink.table(sink),
     }
-    local code, _, status = socket.skip(1, http.request(request))
+    local ok, code, _, status = pcall(function()
+        return socket.skip(1, http.request(request))
+    end)
+    socketutil:reset_timeout()
+    if not ok then
+        return false, tostring(code)
+    end
     if code == 200 then
         return table.concat(sink)
     end
@@ -33,7 +39,7 @@ local function GET(url)
     if code == 403 then
         return false, "FORVO_403"
     end
-    return false, ("[%d]: %s"):format(code or -1, status or "")
+    return false, ("[%s]: %s"):format(tostring(code or -1), status or "")
 end
 
 -- http://lua-users.org/wiki/BaseSixtyFour
@@ -94,8 +100,12 @@ local function get_pronunciation_url(word, language)
     if play_params then
         local iter = string.gmatch(play_params, "'(.-)'")
         local formats = { mp3 = iter(), ogg = iter() }
-        word_url = string.format('https://audio00.forvo.com/%s/%s', "ogg", base64d(formats["ogg"]))
+        if formats.ogg then
+            word_url = string.format('https://audio00.forvo.com/%s/%s', "ogg", base64d(formats["ogg"]))
+        end
     end
+    -- A page without a playable result is still a successful lookup; the note can be
+    -- sent without audio instead of being retried forever.
     return true, word_url
 end
 

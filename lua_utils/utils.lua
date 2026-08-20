@@ -7,22 +7,31 @@ end
 function utils.read_file(filename, line_parser)
     local fn_not_found = "ERROR: file %q was not found!"
     line_parser = line_parser or function(x) return x end
-    local f, data = io.open(filename, 'r'), {}
-    assert(f, fn_not_found:format(filename))
-    for line in f:lines("*l") do
-        table.insert(data, line_parser(line))
-    end
+    local data, err = utils.open_file(filename, "r", function(f)
+        local parsed = {}
+        for line in f:lines("*l") do
+            parsed[#parsed + 1] = line_parser(line)
+        end
+        return parsed
+    end)
+    assert(data, err or fn_not_found:format(filename))
     return data
 end
 
 function utils.open_file(filename, mode, callback)
-    local f = io.open(filename, mode)
+    local f, open_err = io.open(filename, mode)
     if not f then
-        return
+        return nil, open_err
     end
-    local res = callback(f)
-    f:close()
-    return res
+    local ok, res, callback_err = pcall(callback, f)
+    local close_ok, close_err = f:close()
+    if not ok then
+        error(res, 0)
+    end
+    if not close_ok then
+        return nil, close_err
+    end
+    return res, callback_err
 end
 
 function utils.split(input, sep, is_regex)
@@ -56,9 +65,9 @@ function utils.defaultdict(func)
 end
 
 function utils.table_to_set(t, in_place)
-    local t_ = (in_place or true) and t or {}
+    local t_ = in_place and t or {}
     for i,v in ipairs(t) do
-        assert(utils.is_numeric(v) == false, "Table t should not contain numeric values!")
+        assert(type(v) ~= "number" and not utils.is_numeric(v), "Table t should not contain numeric values!")
         t_[v] = i
     end
     return t_

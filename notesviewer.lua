@@ -150,7 +150,7 @@ local function infer_context_field(note, word_field)
 end
 
 local function note_fields(note)
-    local word_field = note.identifier
+    local word_field = note.identifier or conf.word_field:get_value()
     local context_field = note.context_field
         or infer_context_field(note, word_field)
         or conf.context_field:get_value()
@@ -212,29 +212,33 @@ function NotesViewer:rows()
         local entry = {
             index = i,
             book = file_name(note.doc_path) or "Unknown book",
+            book_key = note.doc_path or ("unknown:" .. i),
             word = word_text,
             context = context_preview(field_value(note, context_field)),
         }
         table.insert(entries, entry)
-        if not latest_by_book[entry.book] or entry.index > latest_by_book[entry.book] then
-            latest_by_book[entry.book] = entry.index
+        if not latest_by_book[entry.book_key] or entry.index > latest_by_book[entry.book_key] then
+            latest_by_book[entry.book_key] = entry.index
         end
     end
 
     -- Keep notes grouped by source book, while putting the book containing the newest
     -- queued note first and showing that book's newest note at the top of its group.
     table.sort(entries, function(a, b)
-        if a.book == b.book then
+        if a.book_key == b.book_key then
             return a.index > b.index
         end
-        return latest_by_book[a.book] > latest_by_book[b.book]
+        if latest_by_book[a.book_key] == latest_by_book[b.book_key] then
+            return a.book < b.book
+        end
+        return latest_by_book[a.book_key] > latest_by_book[b.book_key]
     end)
 
     local rows = {}
-    local current_book
+    local current_book_key
     for _, entry in ipairs(entries) do
-        if entry.book ~= current_book then
-            current_book = entry.book
+        if entry.book_key ~= current_book_key then
+            current_book_key = entry.book_key
             table.insert(rows, {
                 text = entry.book,
                 dim = true,
@@ -242,7 +246,7 @@ function NotesViewer:rows()
             })
         end
 
-        local label = ""
+        local label = entry.word
         table.insert(rows, {
             -- Menu uses TextBoxWidget internally, so the looked-up word remains bold
             -- while the context can wrap into the following lines.
