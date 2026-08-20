@@ -30,6 +30,7 @@ local ELLIPSIS = "…"
 local SENTENCE_ENDINGS = { ".", "!", "?", "。", "！", "？" }
 local SYNC_REFRESH_INTERVAL = 2
 local SYNC_ICON = "anki.sync"
+local SYSTEM_UI_FONT_FAMILY = "sans-serif"
 
 -- Japanese and Chinese glyphs take about twice the room a Latin one does, and a row that
 -- counted them the same would come out twice as long for them. Same first byte test the
@@ -245,6 +246,7 @@ function NotesViewer:rows()
             table.insert(rows, {
                 text = entry.book,
                 dim = true,
+                bold = true,
                 select_enabled = false,
             })
         end
@@ -409,7 +411,7 @@ function NotesViewer:show_note_details(index)
     end
     if #info > 0 then
         append_break()
-        append_content("<div>" .. table.concat(info, "<br/>") .. "</div>")
+        append_content('<div style="font-size: 0.7em;">' .. table.concat(info, "<br/>") .. "</div>")
         append_break()
     end
 
@@ -422,15 +424,29 @@ function NotesViewer:show_note_details(index)
     local source = file_name(note.doc_path)
     if source then
         append_break()
-        append_content("<div>Source: " .. plain_field_html(source) .. "</div>")
+        append_content('<div style="font-size: 0.7em;">Source: ' .. plain_field_html(source) .. "</div>")
     end
 
+    -- TextViewer renders HTML through MuPDF, whose default document font does not
+    -- necessarily match KOReader's native UI widgets. Keep the detail content in
+    -- the same system sans-serif family as the queue's Menu rows.
+    local detail_content = table.concat(content)
+    if #detail_content > 0 then
+        detail_content = ('<div style="font-family: %s;">%s</div>')
+            :format(SYSTEM_UI_FONT_FAMILY, detail_content)
+    end
     local details
     details = TextViewer:new {
         title = #title > 0 and title or "Queued note",
-        text = table.concat(content),
+        text = detail_content,
         text_format = "html",
         text_type = "book_info",
+        -- TextViewer routes its title-bar close, Back key and close gesture through
+        -- this callback. Returning to the queue makes all of those exits behave
+        -- like the explicit Close button below.
+        close_callback = function()
+            self:refresh()
+        end,
         buttons_table = {
             { {
                 text = "Open in book",
@@ -452,7 +468,7 @@ function NotesViewer:show_note_details(index)
                 end,
             }, {
                 text = "Close",
-                callback = function() UIManager:close(details) end,
+                callback = function() details:onClose() end,
             } },
         },
     }
