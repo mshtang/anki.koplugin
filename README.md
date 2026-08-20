@@ -30,6 +30,8 @@ When the plugin has been installed succesfully, there will be an extra button pr
 
 The plugin can be configured via the menu, under Search (looking glass icon) - Settings - Anki Settings. This is where you configure the anki-connect URL and optional [API key](https://git.sr.ht/~foosoft/anki-connect#authentication).
 
+The queued-note viewer can also be assigned to a gesture from KOReader's gesture settings: choose **View Anki notes** under the General actions.
+
 
 ![image](https://user-images.githubusercontent.com/34285115/228915515-b6d3eef6-d9e3-4899-9922-db040a29f2b3.png)
 
