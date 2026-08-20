@@ -384,8 +384,12 @@ function NotesViewer:show_note_details(index)
             }, {
                 text = "Remove note",
                 callback = function()
-                    UIManager:close(details)
-                    self:confirm_remove(index)
+                    -- Keep the confirmation above the details view.  Closing the
+                    -- viewer here left nothing to return to when removal was
+                    -- cancelled.
+                    self:confirm_remove(index, function()
+                        UIManager:close(details)
+                    end)
                 end,
             }, {
                 text = "Close",
@@ -436,7 +440,9 @@ function NotesViewer:show_actions(index)
     UIManager:show(dialog)
 end
 
-function NotesViewer:confirm_remove(index)
+-- `after_remove` is used by the details view, which must stay open beneath the
+-- confirmation until the user actually removes the note.
+function NotesViewer:confirm_remove(index, after_remove)
     local note = AnkiConnect.local_notes[index]
     if not note then
         return self:refresh()
@@ -447,8 +453,10 @@ function NotesViewer:confirm_remove(index)
         text = #word > 0 and ("Remove the note for '%s'?"):format(word) or "Remove this note?",
         ok_text = "Remove",
         ok_callback = function()
-            AnkiConnect:remove_queued_note(index)
-            self:refresh()
+            if AnkiConnect:remove_queued_note(index) then
+                if after_remove then after_remove() end
+                self:refresh()
+            end
         end,
     })
 end
