@@ -165,7 +165,14 @@ function AnkiNote:get_picture_context()
     local provider, plugin = self.ui.document.provider, self.ui['Mokuro']
     -- we only add pictures for CBZ (handled by ocr_popup widget)
     if provider == "mupdf" and plugin then
-        local fn = string.format("%s/%s_%s.jpg", self.settings_dir, meta.title, os.date("%Y-%m-%d %H-%M-%S"))
+        if not self.settings_dir then
+            logger.warn("Cannot save Anki context picture: settings directory is unavailable")
+            return
+        end
+        local title = tostring(meta.title or "book"):gsub("[^%w%._%-]", "_")
+        local word = tostring(self.popup_dict.word or "word"):gsub("[^%w%._%-]", "_")
+        local fn = string.format("%s/%s_%s_%s.jpg", self.settings_dir, title, word,
+            os.date("%Y-%m-%d_%H-%M-%S"))
         return plugin:get_context_picture(fn) and fn or nil
     end
 end
@@ -203,6 +210,19 @@ function AnkiNote:build()
         self.built_note = self.is_highlight_note and self:build_highlight_note() or self:build_word_note()
     end
     return self.built_note
+end
+
+-- A build can happen just to inspect a note (for duplicate detection). Remove any
+-- screenshot created by that speculative build when the note is not queued.
+function AnkiNote:discard_built_note()
+    local built = self.built_note
+    local callback = built and built.field_callbacks and built.field_callbacks.picture
+    local image_path = callback and callback.args and callback.args[1]
+    if image_path and not self.built_note_queued then
+        os.remove(image_path)
+    end
+    self.built_note = nil
+    self.built_note_queued = false
 end
 
 function AnkiNote:build_word_note()
@@ -346,6 +366,10 @@ end
 function AnkiNote:set_custom_context(pre_s, pre_c, post_s, post_c)
     self.context = { pre_s, pre_c, post_s, post_c }
     self.cached_context = nil
+    if self.built_note then
+        self:discard_built_note()
+    end
+    self.built_note_queued = false
     self.built_note = nil
 end
 
@@ -353,6 +377,10 @@ function AnkiNote:add_tags(tags)
     for _,t in ipairs(tags) do
         table.insert(self.tags, t)
     end
+    if self.built_note then
+        self:discard_built_note()
+    end
+    self.built_note_queued = false
     self.built_note = nil
 end
 

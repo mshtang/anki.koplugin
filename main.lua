@@ -24,6 +24,13 @@ local NotesViewer = require("notesviewer")
 
 local QUEUED_NOTE_HIGHLIGHT_SECONDS = 2
 local ANKI_NOTES_VIEWER_ACTION = "anki_view_notes"
+
+local function valid_profile_name(name)
+    return type(name) == "string" and #name > 0 and name ~= "." and name ~= ".."
+        and not name:find("[/\\]", 1) and not name:find("%z", 1)
+        and not name:find("[\r\n]", 1)
+end
+
 local AnkiWidget = WidgetContainer:extend {
     name = "anki_widget",
     known_document_profiles = LuaSettings:open(DataStorage:getSettingsDir() .. "/anki_profiles.lua"),
@@ -47,8 +54,14 @@ function AnkiWidget:show_profiles_widget(opts)
         width_factor = 0.9,
         radio_buttons = buttons,
         callback = function(radio)
-            local profile = radio.provider:gsub(".lua$", "", 1)
-            Configuration:load_profile(profile)
+            local profile = radio.provider:gsub("%.lua$", "", 1)
+            local ok, err = pcall(Configuration.load_profile, Configuration, profile)
+            if not ok then
+                return UIManager:show(InfoMessage:new {
+                    text = ("Could not load profile %s: %s"):format(profile, err),
+                    timeout = 5,
+                })
+            end
             self.profile_change_widget:onClose()
             local _, file_name = util.splitFilePathName(self.ui.document.file)
             self.known_document_profiles:saveSetting(file_name, profile)
@@ -83,13 +96,14 @@ end
 function AnkiWidget:show_config_widget()
     local existing = self:existing_note_fingerprint(self.current_note)
     local editable = existing ~= nil and AnkiConnect:queued_note(existing) ~= nil
+    self.config_note_saved = false
     local context_text = "Add with custom context"
     if existing then
         context_text = editable and "Update context" or "Update context (already synced)"
     end
     local with_custom_tags_cb = function()
         self.current_note:add_tags(Configuration.custom_tags:get_value())
-        AnkiConnect:add_note(self.current_note)
+        self.config_note_saved = AnkiConnect:add_note(self.current_note)
         self.config_widget:onClose()
     end
     self.config_widget = ButtonDialog:new {
@@ -113,6 +127,11 @@ function AnkiWidget:show_config_widget()
                 end
             }}
         },
+        tap_close_callback = function()
+            if not self.config_note_saved and self.current_note and self.current_note.discard_built_note then
+                self.current_note:discard_built_note()
+            end
+        end,
     }
     UIManager:show(self.config_widget)
 end
@@ -124,9 +143,9 @@ function AnkiWidget:show_custom_context_widget(existing)
         local m = self.context_menu
         self.current_note:set_custom_context(m.prev_s_cnt, m.prev_c_cnt, m.next_s_cnt, m.next_c_cnt)
         if existing then
-            AnkiConnect:update_note_context(existing, self.current_note)
+            self.config_note_saved = AnkiConnect:update_note_context(existing, self.current_note)
         else
-            AnkiConnect:add_note(self.current_note)
+            self.config_note_saved = AnkiConnect:add_note(self.current_note)
         end
         self.context_menu:onClose()
         self.config_widget:onClose()
@@ -167,13 +186,13 @@ function AnkiWidget:show_connection_widget()
                     callback = function()
                         local function err(msg) return UIManager:show(InfoMessage:new { text = msg, timeout = 4 }) end
                         local fields = self.conn_settings:getFields()
-                        local new_url, is_https = fields[1], false
-                        local new_api_key = fields[2]
+                        local new_url = fields[1] or ""
+                        local new_api_key = fields[2] or ""
                         if #new_url == 0 then return UIManager:show(InfoMessage:new { text = "Empty URL", timeout = 4 }) end
                         new_url, is_https = AnkiConnect.sanitize_url(new_url)
 
                         local function when_connected()
-                            local result, error = AnkiConnect:is_running(new_url)
+                            local result, error = AnkiConnect:is_running(new_url, new_api_key)
                             if error then
                                 local extra_info
                                 if is_https then
@@ -187,9 +206,9 @@ function AnkiWidget:show_connection_widget()
                                 if #new_api_key == 0 then
                                     return err("API key required but not provided!")
                                 end
-                                result, error = AnkiConnect:get_decknames(new_url, new_api_key)
-                                if error then
-                                    return err(("Could not connect: %s"):format(error))
+                                local _, deck_error = AnkiConnect:get_decknames(new_url, new_api_key)
+                                if deck_error then
+                                    return err(("Could not connect: %s"):format(deck_error))
                                 end
                             end
                             return UIManager:show(InfoMessage:new { text = "Connection succesful!", timeout = 4 })
@@ -203,13 +222,13 @@ function AnkiWidget:show_connection_widget()
                     text = _("Save"),
                     callback = function()
                         local fields = self.conn_settings:getFields()
-                        local new_url = fields[1]
+                        local new_url = fields[1] or ""
                         if #new_url == 0 then
                             Configuration.url:delete()
                         elseif new_url ~= Configuration.url:get_value_nodefault() then
                             Configuration.url:update_value(AnkiConnect.sanitize_url(new_url))
                         end
-                        local new_api_key = fields[2]
+                        local new_api_key = fields[2] or ""
                         if new_api_key ~= Configuration.api_key:get_value_nodefault() then
                             Configuration.api_key:update_value(new_api_key)
                         end
@@ -243,6 +262,9 @@ function AnkiWidget:buildSettings()
         return function()
             local input_dialog = MenuBuilder.build_single_dialog("Profile name", "", "", "Choose a name for the profile", function(obj)
                 local profile = obj:getInputText()
+                if not valid_profile_name(profile) then
+                    return UIManager:show(InfoMessage:new { text = "Invalid profile name.", timeout = 4 })
+                end
                 if Configuration.profiles[profile] then
                     return UIManager:show(InfoMessage:new { text = "Profile already exists! Pick another name.", timeout = 4 })
                 end
@@ -274,7 +296,17 @@ function AnkiWidget:buildSettings()
                 text = "Do you want to delete this profile? This cannot be undone.",
                 ok_callback = function()
                     local profile_name = menu_item.text
-                    Configuration.profiles[profile_name]:purge()
+                    if Configuration:is_active(profile_name) then
+                        return UIManager:show(InfoMessage:new {
+                            text = "The active profile cannot be deleted. Switch profiles first.",
+                            timeout = 4,
+                        })
+                    end
+                    local profile_settings = Configuration.profiles[profile_name]
+                    if not profile_settings then
+                        return
+                    end
+                    profile_settings:purge()
                     Configuration.profiles[profile_name] = nil
                     if self.ui.menu.menu_items.anki_settings then
                         self.ui.menu.menu_items.anki_settings.sub_item_table = self:buildSettings()
@@ -513,7 +545,8 @@ function AnkiWidget:init()
     AnkiConnect:load_notes()
     AnkiNote:extend {
         ui = self.ui,
-        ext_modules = self.extensions
+        ext_modules = self.extensions,
+        settings_dir = DataStorage:getSettingsDir(),
     }
 
     -- this holds the latest note created by the user!

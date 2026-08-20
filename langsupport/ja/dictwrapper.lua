@@ -2,7 +2,7 @@ local util = require("util")
 local List = require("lua_utils.list")
 -- utility which wraps a dictionary sub-entry (the popup shown when looking up a word)
 -- with some extra functionality which isn't there by default
-DictEntryWrapper = {
+local DictEntryWrapper = {
     -- currently unused but might come in handy, scavenged from yomichan
     kana = 'うゔ-かが-きぎ-くぐ-けげ-こご-さざ-しじ-すず-せぜ-そぞ-ただ-ちぢ-つづ-てで-とど-はばぱひびぴふぶぷへべぺほぼぽワヷ-ヰヸ-ウヴ-ヱヹ-ヲヺ-カガ-キギ-クグ-ケゲ-コゴ-サザ-シジ-スズ-セゼ-ソゾ-タダ-チヂ-ツヅ-テデ-トド-ハバパヒビピフブプヘベペホボポ',
     kana_word_pattern = "(.*)【.*】",
@@ -42,15 +42,15 @@ function DictEntryWrapper.extend_dictionaries(results, config)
 end
 
 function DictEntryWrapper:new(opts)
-    self.conf = opts.conf
-
-    local index = function(table, k)
-        return rawget(table, k) or rawget(self, k) or rawget(table.dictionary, k)
+    local wrapper = self
+    local index = function(data, k)
+        return rawget(data, k) or rawget(wrapper, k) or rawget(data.dictionary, k)
     end
     local kana_dictionary_field, kana_pattern = unpack(self.kana_pattern[opts.dict.dict] or {})
     local kanji_dictionary_field, kanji_pattern  = unpack(self.kanji_pattern[opts.dict.dict] or {})
     local data = {
         dictionary = opts.dict,
+        conf = opts.conf,
         kana_pattern = kana_pattern or self.kana_word_pattern,
         kana_dict_field = kana_dictionary_field or "word",
         kanji_pattern = kanji_pattern or self.kanji_word_pattern,
@@ -60,13 +60,24 @@ function DictEntryWrapper:new(opts)
 end
 
 function DictEntryWrapper:get_kana_words()
-    local entries = List:from_iter(self.dictionary[self.kana_dict_field]:gmatch(self.kana_pattern))
+    local value = self.dictionary[self.kana_dict_field]
+    if type(value) ~= "string" then
+        return List:new({ self.dictionary.word or "" })
+    end
+    local entries = List:from_iter(value:gmatch(self.kana_pattern))
     -- if the pattern doesn't match, return the plain word, chances are it's already in kana
     return entries:is_empty() and List:new({self.dictionary.word}) or entries
 end
 
 function DictEntryWrapper:get_kanji_words()
-    local kanji_entries_str = self.dictionary[self.kanji_dict_field]:match(self.kanji_pattern)
+    local value = self.dictionary[self.kanji_dict_field]
+    if type(value) ~= "string" then
+        return List:new({})
+    end
+    local kanji_entries_str = value:match(self.kanji_pattern)
+    if not kanji_entries_str then
+        return List:new({})
+    end
     local brackets = { ['('] = 0, [')'] = 0, ['（'] = 0, ['）'] = 0 }
     -- word entries often look like this: ある【有る・在る】
     -- the kanji_match_pattern will give us: 有る・在る

@@ -100,9 +100,9 @@ function Configuration:load_profile(profile_name)
     for _, opt in ipairs(self) do
         opt.active_luasettings = main_profile
         opt.default_luasettings = default_luasettings
-        if main_profile.data[opt.id] then
+        if main_profile.data[opt.id] ~= nil then
             opt.value = main_profile.data[opt.id]
-        elseif default_luasettings and default_luasettings.data[opt.id] then
+        elseif default_luasettings and default_luasettings.data[opt.id] ~= nil then
             opt.value = default_luasettings.data[opt.id]
         elseif opt.required then
             table.insert(missing, opt.id)

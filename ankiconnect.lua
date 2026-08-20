@@ -86,24 +86,27 @@ LuaSocket returns somewhat cryptic errors sometimes
 We can prevent this by modifying/adding the scheme when it's wrong/missing
 --]]
 function AnkiConnect.sanitize_url(url)
-    local valid_url = url
-    local _, scheme_end_idx, scheme, ssl = url:find("^(http(s?)://)")
+    local valid_url
+    local _, scheme_end_idx, scheme = url:find("^(https?://)")
     if not scheme then
         valid_url = 'http://'..url
-    elseif ssl and #ssl > 0 then
-        valid_url = 'https://'..url:sub(scheme_end_idx+1, #url)
+    else
+        valid_url = scheme:lower() .. url:sub(scheme_end_idx + 1)
     end
     if url ~= valid_url then
         logger.info(("Corrected URL from '%s' to '%s'"):format(url, valid_url))
     end
-    return valid_url, ssl ~= nil
+    return valid_url, scheme and scheme:lower() == "https://" or false
 end
 
 function AnkiConnect.with_timeout(timeout, func)
     socketutil:set_timeout(timeout)
-    local res = { func() } -- store all values returned by function
+    local ok, first, second, third = pcall(func)
     socketutil:reset_timeout()
-    return unpack(res)
+    if not ok then
+        return nil, first
+    end
+    return first, second, third
 end
 
 --[[
@@ -133,7 +136,12 @@ end
 -- so there is nothing to write out here.
 --]]
 function AnkiConnect:load_fingerprints(doc_settings, doc_path)
-    self.known_fingerprints = doc_settings:readSetting(FINGERPRINTS_KEY, {})
+    local fingerprints = doc_settings:readSetting(FINGERPRINTS_KEY, {})
+    if type(fingerprints) ~= "table" then
+        logger.warn("Ignoring invalid Anki note fingerprint data for", doc_path)
+        fingerprints = {}
+    end
+    self.known_fingerprints = fingerprints
     self.fingerprints_doc_path = doc_path
     logger.dbg(("Loaded %d note fingerprint(s) for %s."):format(u.count(self.known_fingerprints), doc_path))
 end
@@ -210,6 +218,14 @@ end
 --]]
 local MD5_PATTERN = ("^%s$"):format(("%x"):rep(32))
 
+local function discard_note_assets(note)
+    local callback = note and note.field_callbacks and note.field_callbacks.picture
+    local image_path = callback and callback.args and callback.args[1]
+    if image_path then
+        os.remove(image_path)
+    end
+end
+
 function AnkiConnect:queued_fingerprint(note)
     if type(note.fingerprint) == "string" and note.fingerprint:find(MD5_PATTERN) then
         return note.fingerprint
@@ -226,14 +242,17 @@ function AnkiConnect:queued_note(fingerprint)
     end
 end
 
-function AnkiConnect:is_running(url)
+function AnkiConnect:is_running(url, api_key)
     if not self.wifi_connected then
         return false, "WiFi disconnected."
     end
-    local anki_connect_request = { action = "requestPermission", version = 6 }
-    local result, error = self:POST { payload = anki_connect_request, url = url }
-    if error or result.permission == "denied" then
-        return false, error or "Permission denied."
+    local anki_connect_request = { action = "requestPermission", version = 6, key = api_key }
+    local result, error = self:POST { payload = anki_connect_request, url = url, api_key = api_key }
+    if error or type(result) ~= "table" then
+        return false, error or "Invalid response from AnkiConnect."
+    end
+    if result.permission == "denied" then
+        return false, "Permission denied."
     end
     return result
 end
@@ -254,7 +273,11 @@ function AnkiConnect:POST(opts)
         if opts.api_key then
             payload.key = opts.api_key
         end
-        payload = json.encode(payload)
+        local encoded, encode_err = json.encode(payload)
+        if not encoded then
+            return nil, encode_err or "Could not encode AnkiConnect request."
+        end
+        payload = encoded
     end
     local headers = {
         ["Content-Type"] = "application/json",
@@ -280,11 +303,14 @@ function AnkiConnect:POST(opts)
 
     if type(status_code) == "string" then return nil, status_code end
     if status_code ~= 200 then return nil, string.format("Invalid return code: %s.", status_code) end
-    local response = json.decode(table.concat(sink))
+    local response, decode_err = json.decode(table.concat(sink))
+    if type(response) ~= "table" then
+        return nil, decode_err or "Invalid JSON response from AnkiConnect."
+    end
     local json_err = response.error
     -- this turns a json NULL in a userdata instance, actual error will be a string
-    if type(json_err) == "string" then
-        return nil, json_err
+    if json_err ~= nil and json_err ~= json.null then
+        return nil, tostring(json_err)
     end
     return response.result
 end
@@ -322,7 +348,15 @@ function AnkiConnect:set_image_data(field, img_path)
     if not img_f then
         return true
     end
-    local data = forvo.base64e(img_f:read("*a"))
+    local image = img_f:read("*a")
+    local close_ok, close_err = img_f:close()
+    if not image then
+        return false, "Could not read image: " .. (close_err or "unknown error")
+    end
+    if not close_ok then
+        return false, "Could not close image file: " .. (close_err or "unknown error")
+    end
+    local data = forvo.base64e(image)
     logger.info(("added %d bytes of base64 encoded data"):format(#data))
     os.remove(img_path)
     return true, {
@@ -362,7 +396,7 @@ function AnkiConnect:sync_notes()
         return
     end
 
-    local can_sync, err = self:is_running(conf.url:get_value())
+    local can_sync, err = self:is_running(conf.url:get_value(), conf.api_key:get_value())
     if not can_sync then
         return self:show_popup(string.format("Synchronizing failed!\n%s", err), 3, true)
     end
@@ -405,13 +439,18 @@ function AnkiConnect:sync_notes()
             ok_text = "Discard failures",
             cancel_text = "Keep",
             ok_callback = function()
-                os.remove(self.notes_filename)
                 -- the user threw these away on purpose: take them back out of the books
                 -- they were made from, otherwise an identical note stays refused forever
-                for _, note in ipairs(failed) do
-                    self:forget_fingerprint(self:note_fingerprint(note), note.doc_path)
-                end
+                local previous_notes = self.local_notes
                 self.local_notes = {}
+                local persisted = self:write_notes()
+                if not persisted then
+                    self.local_notes = previous_notes
+                    return self:show_popup("Could not discard failed notes because the queue could not be saved.", 8, true)
+                end
+                for _, note in ipairs(failed) do
+                    self:forget_fingerprint(self:queued_fingerprint(note), note.doc_path)
+                end
                 self:update_notes_count()
             end
         })
@@ -443,15 +482,24 @@ function AnkiConnect:add_note(anki_note)
 
     local fingerprint = self:note_fingerprint(note)
     if self.known_fingerprints[fingerprint] then
+        if anki_note.discard_built_note then
+            anki_note:discard_built_note()
+        end
         self:show_popup("Identical note already exists; skipping duplicate.", 6, true)
         return false, "duplicate_note"
     end
 
-    self.known_fingerprints[fingerprint] = true
     note.fingerprint = fingerprint -- worked out under this note's profile, see queued_fingerprint
     table.insert(self.local_notes, note)
+    local persisted, persist_err = self:write_notes()
+    if not persisted then
+        table.remove(self.local_notes)
+        self:show_popup(("Could not save note locally: %s"):format(persist_err or "unknown error"), 8, true)
+        return false, "persist_failed"
+    end
+    self.known_fingerprints[fingerprint] = true
+    anki_note.built_note_queued = true
     self:update_notes_count()
-    u.open_file(self.notes_filename, 'a', function(f) f:write(json.encode(note) .. '\n') end)
     -- nothing is shown here: adding is confirmed by whatever the user tapped to get
     -- here, and the menu carries the count of what is waiting
     logger.info(("note queued: %s (%d waiting)"):format(note.data.fields[note.identifier], #self.local_notes))
@@ -485,14 +533,25 @@ function AnkiConnect:update_note_context(old_fingerprint, anki_note)
         return false, "unchanged"
     end
     if self.known_fingerprints[fingerprint] then
+        if anki_note.discard_built_note then
+            anki_note:discard_built_note()
+        end
         self:show_popup("A note with this context already exists; skipping duplicate.", 6, true)
         return false, "duplicate_note"
     end
 
     note.fingerprint = fingerprint
+    local old_note = self.local_notes[queue_idx]
     self.local_notes[queue_idx] = note
+    local persisted, persist_err = self:write_notes()
+    if not persisted then
+        self.local_notes[queue_idx] = old_note
+        self:show_popup(("Could not save note locally: %s"):format(persist_err or "unknown error"), 8, true)
+        return false, "persist_failed"
+    end
     self:move_fingerprint(old_fingerprint, fingerprint, note.doc_path)
-    self:write_notes()
+    discard_note_assets(old_note)
+    anki_note.built_note_queued = true
     self:show_popup("Updated the note's context.", 3, true)
     return true, "queued"
 end
@@ -505,9 +564,14 @@ function AnkiConnect:remove_queued_note(index)
     end
     local fingerprint = self:queued_fingerprint(note)
     table.remove(self.local_notes, index)
+    local persisted, persist_err = self:write_notes()
+    if not persisted then
+        table.insert(self.local_notes, index, note)
+        self:show_popup(("Could not save queue changes: %s"):format(persist_err or "unknown error"), 8, true)
+        return false
+    end
     self:update_notes_count()
     self:forget_fingerprint(fingerprint, note.doc_path)
-    self:write_notes()
     return true
 end
 
@@ -519,11 +583,14 @@ end
 function AnkiConnect:load_notes()
     self.local_notes = {}
     local seen = {} -- scoped to this read: it only guards against a doubled line
-    u.open_file(self.notes_filename, 'r', function(f)
+    local loaded_ok, load_err = pcall(function()
+        u.open_file(self.notes_filename, 'r', function(f)
         for note_json in f:lines() do
             local note, err = json.decode(note_json)
-            assert(note, ("Could not parse note '%s': %s"):format(note_json, err))
-            local fingerprint = self:note_fingerprint(note)
+            assert(type(note) == "table" and type(note.data) == "table"
+                and type(note.data.fields) == "table",
+                ("Could not parse queued note: %s"):format(err or "invalid note data"))
+            local fingerprint = self:queued_fingerprint(note)
             if not seen[fingerprint] then
                 table.insert(self.local_notes, note)
                 seen[fingerprint] = true
@@ -531,7 +598,13 @@ function AnkiConnect:load_notes()
                 logger.info("Skipped duplicate offline note (all fields match).")
             end
         end
+        end)
     end)
+    if not loaded_ok then
+        logger.warn("Could not load the complete Anki note queue:", load_err)
+        self:update_notes_count()
+        return
+    end
     self:update_notes_count()
     self:write_notes() -- drops the duplicates that were skipped, if there were any
     logger.dbg(("Loaded %d notes from disk."):format(#self.local_notes))
@@ -551,11 +624,32 @@ end
 
 -- the queue on disk is the queue in memory: always write the whole thing back
 function AnkiConnect:write_notes()
-    u.open_file(self.notes_filename, 'w', function(f)
+    local temporary_filename = self.notes_filename .. ".tmp"
+    local ok, err = u.open_file(temporary_filename, 'w', function(f)
         for _, note in ipairs(self.local_notes) do
-            f:write(json.encode(note), '\n')
+            local encoded, encode_err = json.encode(note)
+            if not encoded then
+                return nil, encode_err or "could not encode note"
+            end
+            local wrote, write_err = f:write(encoded, '\n')
+            if not wrote then
+                return nil, write_err
+            end
         end
+        return true
     end)
+    if not ok then
+        os.remove(temporary_filename)
+        logger.warn("Could not write Anki note queue:", err)
+        return false, err
+    end
+    local renamed, rename_err = os.rename(temporary_filename, self.notes_filename)
+    if not renamed then
+        os.remove(temporary_filename)
+        logger.warn("Could not replace Anki note queue:", rename_err)
+        return false, rename_err
+    end
+    return true
 end
 
 function AnkiConnect:onNetworkConnected()
